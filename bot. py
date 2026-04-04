@@ -1,9 +1,13 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import json
+import tempfile
+import subprocess
 import re
 from datetime import datetime
+from gtts import gTTS
+from PIL import Image, ImageDraw, ImageFont
+import PyPDF2
+import docx
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -11,160 +15,190 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-OWNER_ID = 7021542402  # اتركه كما هو أو غيره
-DATA_FILE = "users.json"
+def extract_text(file_path):
+    """استخراج النص من ملف (txt, pdf, docx)"""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.txt':
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    elif ext == '.pdf':
+        text = ""
+        with open(file_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                text += page.extract_text()
+        return text
+    elif ext == '.docx':
+        doc = docx.Document(file_path)
+        return "\n".join([para.text for para in doc.paragraphs])
+    else:
+        raise Exception("نوع ملف غير مدعوم (يدعم: txt, pdf, docx)")
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
-            return json.load(f)
-    return {}
+def split_into_scenes(text, max_len=300):
+    """تقسيم النص إلى مشاهد (كل مشهد 300 حرف كحد أقصى)"""
+    sentences = re.split(r'(?<=[.!?؟]) +', text)
+    scenes = []
+    current = ""
+    for sent in sentences:
+        if len(current) + len(sent) + 1 <= max_len:
+            current += " " + sent if current else sent
+        else:
+            if current:
+                scenes.append(current)
+            current = sent
+    if current:
+        scenes.append(current)
+    if not scenes:
+        scenes = [text[:max_len]]
+    return scenes[:12]  # حد أقصى 12 مشهداً لضمان السرعة
 
-def save_data(data):
-    with open(DATA_FILE, 'w') as f:
-        json.dump(data, f)
+def create_scene_image(text, index, output_path):
+    """إنشاء صورة مشهد بخلفية جذابة ونص"""
+    width, height = 1280, 720
+    img = Image.new('RGB', (width, height), color=(20, 30, 60))  # خلفية زرقاء داكنة
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
+    except:
+        font = ImageFont.load_default()
+    
+    # تقسيم النص إلى أسطر (كل سطر 30 حرفاً)
+    words = text.split()
+    lines = []
+    line = ""
+    for w in words:
+        if len(line + " " + w) <= 35:
+            line += " " + w if line else w
+        else:
+            lines.append(line)
+            line = w
+    if line:
+        lines.append(line)
+    
+    y = 250
+    for l in lines:
+        draw.text((100, y), l, fill=(255, 255, 255), font=font)
+        y += 70
+    
+    # إضافة رقم المشهد
+    draw.text((1150, 650), f"{index}", fill=(200, 200, 200), font=font)
+    img.save(output_path)
 
-# توليد كود بوت ابن (بسيط ويعمل)
-def generate_child_bot_code(token, username, owner_username, channel_link):
-    return f'''
-import os
-import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-
-TOKEN = "{token}"
-bot = telebot.TeleBot(TOKEN)
-
-OWNER = "{owner_username}"
-CHANNEL = "{channel_link}"
-
-def main_menu():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(KeyboardButton("📢 القناة"), KeyboardButton("👤 المطور"))
-    markup.add(KeyboardButton("➕ إضافة زر"), KeyboardButton("🗑️ حذف زر"))
-    markup.add(KeyboardButton("📋 عرض الأزرار"))
-    return markup
-
-user_buttons = []  # قائمة الأزرار المخصصة
-
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.send_message(message.chat.id, f"مرحباً بك في البوت @{username}!\\nاستخدم الأزرار أدناه.", reply_markup=main_menu())
-
-@bot.message_handler(func=lambda m: m.text == "📢 القناة")
-def channel_btn(message):
-    bot.send_message(message.chat.id, f"قناتنا: {CHANNEL}")
-
-@bot.message_handler(func=lambda m: m.text == "👤 المطور")
-def owner_btn(message):
-    bot.send_message(message.chat.id, f"المطور: @{OWNER}")
-
-@bot.message_handler(func=lambda m: m.text == "➕ إضافة زر")
-def add_btn(message):
-    msg = bot.send_message(message.chat.id, "أرسل النص الذي سيظهر على الزر:")
-    bot.register_next_step_handler(msg, get_btn_text)
-
-def get_btn_text(message):
-    text = message.text
-    msg = bot.send_message(message.chat.id, "أرسل الرد الذي سيرسله البوت عند الضغط:")
-    bot.register_next_step_handler(msg, lambda m: save_btn(m, text))
-
-def save_btn(message, btn_text):
-    reply = message.text
-    user_buttons.append({{"text": btn_text, "reply": reply}})
-    bot.send_message(message.chat.id, f"✅ تم إضافة الزر: {btn_text}")
-
-@bot.message_handler(func=lambda m: m.text == "🗑️ حذف زر")
-def del_btn(message):
-    if not user_buttons:
-        bot.send_message(message.chat.id, "لا توجد أزرار لحذفها.")
-        return
-    markup = InlineKeyboardMarkup()
-    for btn in user_buttons:
-        markup.add(InlineKeyboardButton(btn["text"], callback_data=f"del_{{btn['text']}}"))
-    bot.send_message(message.chat.id, "اختر الزر لحذفه:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("del_"))
-def delete_callback(call):
-    btn_text = call.data.split("_")[1]
-    global user_buttons
-    user_buttons = [b for b in user_buttons if b["text"] != btn_text]
-    bot.answer_callback_query(call.id, "تم الحذف")
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-
-@bot.message_handler(func=lambda m: m.text == "📋 عرض الأزرار")
-def list_btns(message):
-    if not user_buttons:
-        bot.send_message(message.chat.id, "لا توجد أزرار مخصصة.")
-        return
-    text = "الأزرار المضافة:\\n"
-    for btn in user_buttons:
-        text += f"- {btn['text']} -> {btn['reply']}\\n"
-    bot.send_message(message.chat.id, text)
-
-@bot.message_handler(func=lambda m: True)
-def handle_custom_buttons(message):
-    for btn in user_buttons:
-        if message.text == btn["text"]:
-            bot.send_message(message.chat.id, btn["reply"])
-            return
-
-print("✅ البوت يعمل...")
-bot.infinity_polling()
-'''
+def text_to_video(text, output_video):
+    """تحويل النص إلى فيديو (صور + صوت)"""
+    scenes = split_into_scenes(text)
+    if not scenes:
+        raise Exception("لا يوجد نص صالح للتحويل")
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # إنشاء صور المشاهد
+        scene_images = []
+        for i, scene in enumerate(scenes):
+            img_path = os.path.join(tmpdir, f"scene_{i}.png")
+            create_scene_image(scene, i+1, img_path)
+            scene_images.append(img_path)
+        
+        # تحويل النص الكامل إلى صوت (gTTS)
+        full_text = " ".join(scenes)
+        audio_path = os.path.join(tmpdir, "audio.mp3")
+        tts = gTTS(text=full_text[:3000], lang='ar', slow=False)
+        tts.save(audio_path)
+        
+        # حساب مدة الصوت
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path], capture_output=True, text=True)
+        audio_duration = float(result.stdout.strip())
+        
+        # توزيع المدة على المشاهد
+        duration_per_scene = audio_duration / len(scene_images)
+        
+        # إنشاء ملف concat لـ ffmpeg
+        concat_file = os.path.join(tmpdir, "concat.txt")
+        with open(concat_file, 'w') as f:
+            for img in scene_images:
+                f.write(f"file '{img}'\nduration {duration_per_scene}\n")
+        with open(concat_file, 'a') as f:
+            f.write(f"file '{scene_images[-1]}'\n")
+        
+        # دمج الصور والصوت في فيديو
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', concat_file,
+            '-i', audio_path,
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-shortest',
+            output_video
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+    
+    return output_video
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("➕ صنع بوت جديد", callback_data="new_bot"))
-    markup.add(InlineKeyboardButton("📋 بوتاتي", callback_data="my_bots"))
-    if message.chat.id == OWNER_ID:
-        markup.add(InlineKeyboardButton("⚙️ إعدادات", callback_data="admin"))
-    bot.send_message(message.chat.id, "🤖 مرحباً! أنا مصنع البوتات.\nأرسل توكن بوتك الجديد.", reply_markup=markup)
+    bot.send_message(message.chat.id,
+        "🎥 *بوت تحويل النصوص إلى فيديو تعليمي*\n\n"
+        "أرسل لي ملفاً نصياً (txt, pdf, docx) وسأقوم بتحليله وتحويله إلى فيديو احترافي.\n\n"
+        "📌 *ملاحظات:*\n"
+        "- النص يجب ألا يزيد عن 2500 حرف (لضمان سرعة المعالجة).\n"
+        "- الفيديو الناتج سيكون بصيغة MP4 مع شرائح نصية وصوت.\n"
+        "- قد تستغرق المعالجة 30-60 ثانية حسب طول النص.",
+        parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    if call.data == "new_bot":
-        bot.send_message(call.message.chat.id, "🔑 أرسل توكن البوت (من @BotFather):")
-        bot.register_next_step_handler(call.message, process_token)
-    elif call.data == "my_bots":
-        data = load_data()
-        user_id = str(call.message.chat.id)
-        bots = data.get(user_id, [])
-        if not bots:
-            bot.send_message(call.message.chat.id, "📭 ليس لديك أي بوتات بعد.")
-        else:
-            txt = "📋 بوتاتك:\n" + "\n".join([f"- @{b['username']}" for b in bots])
-            bot.send_message(call.message.chat.id, txt)
-    elif call.data == "admin" and call.message.chat.id == OWNER_ID:
-        bot.send_message(OWNER_ID, "🔧 لوحة تحكم المالك:\nلا توجد إعدادات متاحة حالياً.")
-
-def process_token(message):
-    token = message.text.strip().replace(" ", "")
-    user_id = message.chat.id
+@bot.message_handler(content_types=['document'])
+def handle_doc(message):
     try:
-        test = telebot.TeleBot(token)
-        me = test.get_me()
-        username = me.username
-        # حفظ البوت
-        data = load_data()
-        user_bots = data.get(str(user_id), [])
-        user_bots.append({"username": username, "token": token})
-        data[str(user_id)] = user_bots
-        save_data(data)
-        # توليد الكود
-        owner_username = "zakros0_onlinebot"
-        channel_link = "https://t.me/KAR_XNiyzokyyy"
-        code = generate_child_bot_code(token, username, owner_username, channel_link)
-        # إرسال الكود كملف
-        with open(f"{username}_bot.py", "w") as f:
-            f.write(code)
-        with open(f"{username}_bot.py", "rb") as f:
-            bot.send_document(user_id, f, caption=f"✅ تم إنشاء البوت @{username}\nقم بتحميل هذا الملف ورفعه على Heroku.")
-        os.remove(f"{username}_bot.py")
+        # تحميل الملف
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(message.document.file_name)[1]) as tmp:
+            tmp.write(downloaded)
+            tmp_path = tmp.name
+        
+        # استخراج النص
+        text = extract_text(tmp_path)
+        os.unlink(tmp_path)
+        
+        if len(text) > 2500:
+            bot.reply_to(message, "❌ النص في الملف طويل جداً (الحد الأقصى 2500 حرف).")
+            return
+        if len(text) < 50:
+            bot.reply_to(message, "❌ النص قصير جداً (يحتاج على الأقل 50 حرفاً).")
+            return
+        
+        msg = bot.reply_to(message, "⏳ جاري تحليل النص وتحويله إلى فيديو... قد يستغرق دقيقة.")
+        out_file = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        text_to_video(text, out_file)
+        
+        with open(out_file, 'rb') as f:
+            bot.send_video(message.chat.id, f, caption="✅ تم تحويل الملف النصي إلى فيديو تعليمي بنجاح!", supports_streaming=True)
+        os.remove(out_file)
+        
     except Exception as e:
-        bot.send_message(user_id, f"❌ فشل: {str(e)[:200]}")
+        bot.reply_to(message, f"❌ حدث خطأ: {str(e)[:200]}")
+
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
+def handle_text(message):
+    text = message.text.strip()
+    if len(text) > 2000:
+        bot.reply_to(message, "❌ النص طويل جداً (الحد الأقصى 2000 حرف).")
+        return
+    if len(text) < 50:
+        bot.reply_to(message, "❌ النص قصير جداً (يحتاج 50 حرفاً على الأقل).")
+        return
+    msg = bot.reply_to(message, "⏳ جاري تحويل النص إلى فيديو...")
+    try:
+        out_file = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        text_to_video(text, out_file)
+        with open(out_file, 'rb') as f:
+            bot.send_video(message.chat.id, f, caption="✅ تم إنشاء الفيديو!", supports_streaming=True)
+        os.remove(out_file)
+    except Exception as e:
+        bot.edit_message_text(f"❌ خطأ: {str(e)[:200]}", message.chat.id, msg.message_id)
 
 if __name__ == "__main__":
-    print("✅ البوت الرئيسي يعمل...")
+    print("✅ بوت تحليل النصوص وإنتاج الفيديو يعمل...")
     bot.remove_webhook()
     bot.infinity_polling()
