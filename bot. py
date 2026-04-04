@@ -1,50 +1,57 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import re
 import tempfile
 import subprocess
 import time
 from datetime import datetime
+from gtts import gTTS
+from PIL import Image, ImageDraw, ImageFont
+from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
 
-# إعدادات البوت
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise Exception("BOT_TOKEN environment variable not set.")
+    raise Exception("BOT_TOKEN not set")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# مجلد مؤقت للعمل
-TEMP_DIR = "temp_videos"
-os.makedirs(TEMP_DIR, exist_ok=True)
+# مجلد مؤقت
+TEMP_DIR = tempfile.mkdtemp()
 
-# ========== دوال تحويل النص إلى فيديو ==========
-def text_to_speech(text, output_mp3):
-    """تحويل النص إلى صوت MP3 باستخدام gTTS"""
-    from gtts import gTTS
-    tts = gTTS(text=text, lang='ar')  # اللغة العربية
-    tts.save(output_mp3)
-    return output_mp3
+def split_text(text, max_chars=300):
+    """تقسيم النص إلى أجزاء قصيرة (كل جزء 300 حرف) لإنشاء شرائح متعددة"""
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    chunks = []
+    current = ""
+    for sent in sentences:
+        if len(current) + len(sent) + 1 <= max_chars:
+            current += " " + sent if current else sent
+        else:
+            if current:
+                chunks.append(current)
+            current = sent
+    if current:
+        chunks.append(current)
+    return chunks if chunks else [text[:max_chars]]
 
-def create_slide_image(text, index, output_image):
-    """إنشاء صورة شريحة نصية"""
-    from PIL import Image, ImageDraw, ImageFont
-    # إنشاء صورة بحجم 1280x720 (HD)
-    img = Image.new('RGB', (1280, 720), color=(0, 0, 30))  # خلفية زرقاء داكنة
+def create_slide(text, index, output_path):
+    """إنشاء صورة شريحة بخلفية مناسبة ونص"""
+    width, height = 1280, 720
+    img = Image.new('RGB', (width, height), color=(20, 30, 60))  # خلفية زرقاء داكنة
     draw = ImageDraw.Draw(img)
     
-    # محاولة استخدام خط عربي (يمكنك وضع مسار خط حقيقي)
+    # استخدام خط افتراضي (يمكن تغييره لاحقاً)
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
     except:
         font = ImageFont.load_default()
     
-    # تقسيم النص إلى أسطر
-    lines = []
+    # تقسيم النص إلى أسطر (كل سطر بحد أقصى 30 حرفاً)
     words = text.split()
+    lines = []
     line = ""
     for w in words:
-        if len(line + " " + w) < 30:  # حد أقصى 30 حرفًا لكل سطر
+        if len(line + " " + w) <= 30:
             line += " " + w if line else w
         else:
             lines.append(line)
@@ -52,121 +59,111 @@ def create_slide_image(text, index, output_image):
     if line:
         lines.append(line)
     
-    y_start = 200
-    for i, line in enumerate(lines):
-        draw.text((50, y_start + i*60), line, fill=(255,255,255), font=font)
+    y = 200
+    for line in lines:
+        draw.text((100, y), line, fill=(255, 255, 255), font=font)
+        y += 70
     
     # إضافة رقم الشريحة
-    draw.text((1200, 680), f"Slide {index}", fill=(200,200,200), font=font)
+    draw.text((1150, 650), f"{index}", fill=(200, 200, 200), font=font)
     
-    img.save(output_image)
-    return output_image
+    img.save(output_path)
 
-def create_video_from_text(text, output_video):
-    """إنشاء فيديو من النص (صوت + صور شرائح)"""
-    from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips
-    import numpy as np
+def text_to_video(full_text, output_video):
+    """تحويل النص الكامل إلى فيديو (صوت + شرائح)"""
+    # 1. تقسيم النص إلى شرائح
+    chunks = split_text(full_text, max_chars=280)
+    if len(chunks) > 15:
+        chunks = chunks[:15]  # حد أقصى 15 شريحة لتجنب طول الفيديو
+    print(f"عدد الشرائح: {len(chunks)}")
     
-    # 1. تقسيم النص إلى جمل أو أجزاء (كل 500 حرف شريحة)
-    sentences = re.split(r'[.!?]', text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
-    if not sentences:
-        sentences = [text[:500]]
-    
-    # 2. إنشاء الشرائح (صورة لكل شريحة)
-    slide_images = []
-    for i, sent in enumerate(sentences[:10]):  # حد أقصى 10 شرائح
+    # 2. إنشاء الشرائح كصور
+    slide_paths = []
+    for i, chunk in enumerate(chunks):
         img_path = os.path.join(TEMP_DIR, f"slide_{i}.png")
-        create_slide_image(sent, i+1, img_path)
-        slide_images.append(img_path)
+        create_slide(chunk, i+1, img_path)
+        slide_paths.append(img_path)
     
-    # 3. تحويل النص الكامل إلى صوت
+    # 3. تحويل النص الكامل إلى صوت (gTTS)
     audio_path = os.path.join(TEMP_DIR, "audio.mp3")
-    text_to_speech(" ".join(sentences), audio_path)
+    tts = gTTS(text=full_text[:3500], lang='ar', slow=False)  # حد أقصى 3500 حرف للصوت
+    tts.save(audio_path)
     audio = AudioFileClip(audio_path)
     audio_duration = audio.duration
     
-    # 4. توزيع مدة كل شريحة حسب طول الصوت
-    duration_per_slide = audio_duration / len(slide_images)
+    # 4. حساب مدة كل شريحة (توزيع متساوٍ)
+    duration_per_slide = audio_duration / len(slide_paths)
     clips = []
-    for img_path in slide_images:
+    for img_path in slide_paths:
         clip = ImageClip(img_path).set_duration(duration_per_slide).resize(height=720)
         clips.append(clip)
     
     # 5. دمج الشرائح والصوت
-    video = concatenate_videoclips(clips, method="compose")
-    video = video.set_audio(audio)
-    video.write_videofile(output_video, fps=24, codec='libx264', audio_codec='aac', threads=2)
+    final_video = concatenate_videoclips(clips, method="compose")
+    final_video = final_video.set_audio(audio)
+    final_video.write_videofile(output_video, fps=24, codec='libx264', audio_codec='aac', threads=2, preset='ultrafast')
     
     return output_video
 
-# ========== أوامر البوت ==========
 @bot.message_handler(commands=['start'])
-def start_command(message):
-    bot.send_message(message.chat.id, 
-        "🎥 أرسل لي نصًا (أو ملف نصي) وسأحوله إلى فيديو تعليمي.\n\n"
-        "ملاحظة: الفيديو سيكون بسيطًا (نص متحرك + صوت). الحد الأقصى للنص 3000 حرف.")
+def start_cmd(message):
+    bot.send_message(message.chat.id,
+        "🎥 أرسل لي نصًا (أو ملف .txt) وسأحوله إلى فيديو تعليمي.\n\n"
+        "📌 ملاحظات:\n"
+        "- الحد الأقصى للنص: 3000 حرف\n"
+        "- الفيديو سيحتوي على شرائح نصية + صوت مركب\n"
+        "- قد يستغرق التحويل دقيقة أو أكثر حسب طول النص")
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     text = message.text.strip()
-    if len(text) > 3000:
-        bot.reply_to(message, "❌ النص طويل جدًا. الرجاء إرسال نص أقل من 3000 حرف.")
-        return
     if len(text) < 50:
-        bot.reply_to(message, "❌ النص قصير جدًا. يرجى إرسال نص أطول (على الأقل 50 حرفًا).")
+        bot.reply_to(message, "❌ النص قصير جدًا (يحتاج على الأقل 50 حرفًا).")
+        return
+    if len(text) > 3000:
+        bot.reply_to(message, "❌ النص طويل جدًا (الحد الأقصى 3000 حرف).")
         return
     
-    # إرسال رسالة انتظار
-    msg = bot.reply_to(message, "⏳ جاري تحويل النص إلى فيديو... قد يستغرق دقيقة.")
-    
+    msg = bot.reply_to(message, "⏳ جاري تحويل النص إلى فيديو... قد يستغرق 1-2 دقيقة.")
     try:
-        # إنشاء اسم فريد للفيديو
-        filename = f"lecture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        video_path = os.path.join(TEMP_DIR, filename)
+        out_file = os.path.join(TEMP_DIR, f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        text_to_video(text, out_file)
         
-        # تحويل
-        create_video_from_text(text, video_path)
+        with open(out_file, 'rb') as f:
+            bot.send_video(message.chat.id, f, caption="✅ تم إنشاء الفيديو بنجاح!", supports_streaming=True)
         
-        # إرسال الفيديو
-        with open(video_path, 'rb') as vid:
-            bot.send_video(message.chat.id, vid, caption="✅ تم تحويل المحاضرة إلى فيديو.", supports_streaming=True)
-        
-        # تنظيف الملفات
-        os.remove(video_path)
+        # تنظيف
+        os.remove(out_file)
         for f in os.listdir(TEMP_DIR):
             if f.endswith(('.png', '.mp3')):
                 os.remove(os.path.join(TEMP_DIR, f))
-                
     except Exception as e:
         bot.edit_message_text(f"❌ حدث خطأ: {str(e)[:200]}", message.chat.id, msg.message_id)
-        print(f"Error: {e}")
 
 @bot.message_handler(content_types=['document'])
-def handle_document(message):
-    # استقبال ملف نصي
+def handle_doc(message):
+    if message.document.mime_type != 'text/plain':
+        bot.reply_to(message, "❌ يرجى إرسال ملف نصي بصيغة .txt فقط.")
+        return
     try:
         file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        text = downloaded_file.decode('utf-8')
-        if len(text) > 5000:
-            bot.reply_to(message, "❌ الملف كبير جدًا. حد أقصى 5000 حرف.")
+        downloaded = bot.download_file(file_info.file_path)
+        text = downloaded.decode('utf-8')
+        if len(text) > 3000:
+            bot.reply_to(message, "❌ الملف كبير جدًا (الحد الأقصى 3000 حرف).")
             return
-        # إعادة استخدام نفس الدالة
+        if len(text) < 50:
+            bot.reply_to(message, "❌ الملف قصير جدًا.")
+            return
         msg = bot.reply_to(message, "⏳ جاري تحويل الملف إلى فيديو...")
-        filename = f"lecture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        video_path = os.path.join(TEMP_DIR, filename)
-        create_video_from_text(text, video_path)
-        with open(video_path, 'rb') as vid:
-            bot.send_video(message.chat.id, vid, caption="✅ تم تحويل الملف النصي إلى فيديو.", supports_streaming=True)
-        os.remove(video_path)
-        for f in os.listdir(TEMP_DIR):
-            if f.endswith(('.png', '.mp3')):
-                os.remove(os.path.join(TEMP_DIR, f))
+        out_file = os.path.join(TEMP_DIR, f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        text_to_video(text, out_file)
+        with open(out_file, 'rb') as f:
+            bot.send_video(message.chat.id, f, caption="✅ تم تحويل الملف النصي إلى فيديو!", supports_streaming=True)
+        os.remove(out_file)
     except Exception as e:
-        bot.reply_to(message, f"❌ فشل معالجة الملف: {str(e)[:200]}")
+        bot.reply_to(message, f"❌ فشل المعالجة: {str(e)[:200]}")
 
-# ========== التشغيل ==========
 if __name__ == "__main__":
     print("✅ بوت تحويل النص إلى فيديو يعمل...")
     bot.remove_webhook()
