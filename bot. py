@@ -1,483 +1,173 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-import sqlite3
-import json
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import re
+import tempfile
 import subprocess
+import time
 from datetime import datetime
 
+# إعدادات البوت
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise Exception("BOT_TOKEN not set")
+    raise Exception("BOT_TOKEN environment variable not set.")
 
-main_bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
 
-OWNER_ID = 7021542402
-DB_NAME = "factory.db"
+# مجلد مؤقت للعمل
+TEMP_DIR = "temp_videos"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-# ========== قاعدة البيانات ==========
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        can_create INTEGER DEFAULT 1,
-        bots_limit INTEGER DEFAULT 1,
-        created_bots TEXT DEFAULT '[]'
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS bots (
-        token TEXT PRIMARY KEY,
-        owner_id INTEGER,
-        username TEXT,
-        created_at TEXT
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS config (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )''')
-    c.execute("INSERT OR IGNORE INTO users (user_id, can_create, bots_limit) VALUES (?,?,?)", (OWNER_ID, 1, 999))
-    conn.commit()
-    conn.close()
+# ========== دوال تحويل النص إلى فيديو ==========
+def text_to_speech(text, output_mp3):
+    """تحويل النص إلى صوت MP3 باستخدام gTTS"""
+    from gtts import gTTS
+    tts = gTTS(text=text, lang='ar')  # اللغة العربية
+    tts.save(output_mp3)
+    return output_mp3
 
-init_db()
-
-def get_channel():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT value FROM config WHERE key='channel_link'")
-    link = c.fetchone()
-    c.execute("SELECT value FROM config WHERE key='channel_username'")
-    uname = c.fetchone()
-    conn.close()
-    return {"link": link[0] if link else "", "username": uname[0] if uname else ""}
-
-def set_channel(link, username):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("REPLACE INTO config (key,value) VALUES (?,?)", ("channel_link", link))
-    c.execute("REPLACE INTO config (key,value) VALUES (?,?)", ("channel_username", username))
-    conn.commit()
-    conn.close()
-
-def get_user(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT can_create, bots_limit, created_bots FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {"can_create": row[0], "bots_limit": row[1], "created_bots": json.loads(row[2])}
-    return None
-
-def create_user(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, can_create, bots_limit, created_bots) VALUES (?,?,?,?)",
-              (user_id, 1, 1, json.dumps([])))
-    conn.commit()
-    conn.close()
-
-def add_bot(user_id, token, username):
-    user = get_user(user_id)
-    if not user:
-        create_user(user_id)
-        user = get_user(user_id)
-    bots = user["created_bots"]
-    bots.append({"token": token, "username": username})
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET created_bots=? WHERE user_id=?", (json.dumps(bots), user_id))
-    c.execute("INSERT OR REPLACE INTO bots (token, owner_id, username, created_at) VALUES (?,?,?,?)",
-              (token, user_id, username, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def is_subscribed(user_id, channel_username):
-    if not channel_username:
-        return True
+def create_slide_image(text, index, output_image):
+    """إنشاء صورة شريحة نصية"""
+    from PIL import Image, ImageDraw, ImageFont
+    # إنشاء صورة بحجم 1280x720 (HD)
+    img = Image.new('RGB', (1280, 720), color=(0, 0, 30))  # خلفية زرقاء داكنة
+    draw = ImageDraw.Draw(img)
+    
+    # محاولة استخدام خط عربي (يمكنك وضع مسار خط حقيقي)
     try:
-        member = main_bot.get_chat_member(f"@{channel_username}", user_id)
-        return member.status in ["member", "administrator", "creator"]
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
     except:
-        return False
-
-# ========== توليد كود البوت الابن (آمن تماماً) ==========
-def generate_child_code(token, username, owner_id, channel_link, channel_username):
-    code = f'''
-import os
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-import sqlite3
-
-TOKEN = "{token}"
-bot = telebot.TeleBot(TOKEN)
-
-CH_LINK = "{channel_link}"
-CH_UNAME = "{channel_username}"
-
-conn = sqlite3.connect("child_data.db", check_same_thread=False)
-c = conn.cursor()
-c.execute('CREATE TABLE IF NOT EXISTS buttons (id INTEGER PRIMARY KEY, text TEXT, type TEXT, content TEXT)')
-conn.commit()
-
-def is_sub(user_id):
-    if not CH_UNAME:
-        return True
-    try:
-        member = bot.get_chat_member(f"@{{CH_UNAME}}", user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except:
-        return False
-
-def main_menu():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("➕ إضافة زر", "✏️ تعديل زر")
-    kb.add("🗑️ حذف زر", "🌐 تغيير اللغة")
-    return kb
-
-def show_buttons(message):
-    c.execute("SELECT id, text, type, content FROM buttons")
-    rows = c.fetchall()
-    if not rows:
-        bot.send_message(message.chat.id, "لا توجد أزرار.")
-        return
-    markup = InlineKeyboardMarkup()
-    for row in rows:
-        btn_id, btn_text, btn_type, btn_content = row
-        if btn_type == "link":
-            markup.add(InlineKeyboardButton(btn_text, url=btn_content))
+        font = ImageFont.load_default()
+    
+    # تقسيم النص إلى أسطر
+    lines = []
+    words = text.split()
+    line = ""
+    for w in words:
+        if len(line + " " + w) < 30:  # حد أقصى 30 حرفًا لكل سطر
+            line += " " + w if line else w
         else:
-            markup.add(InlineKeyboardButton(btn_text, callback_data=f"btn_{{btn_id}}"))
-    bot.send_message(message.chat.id, "الأزرار:", reply_markup=markup)
+            lines.append(line)
+            line = w
+    if line:
+        lines.append(line)
+    
+    y_start = 200
+    for i, line in enumerate(lines):
+        draw.text((50, y_start + i*60), line, fill=(255,255,255), font=font)
+    
+    # إضافة رقم الشريحة
+    draw.text((1200, 680), f"Slide {index}", fill=(200,200,200), font=font)
+    
+    img.save(output_image)
+    return output_image
 
+def create_video_from_text(text, output_video):
+    """إنشاء فيديو من النص (صوت + صور شرائح)"""
+    from moviepy.editor import ImageClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips
+    import numpy as np
+    
+    # 1. تقسيم النص إلى جمل أو أجزاء (كل 500 حرف شريحة)
+    sentences = re.split(r'[.!?]', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+    if not sentences:
+        sentences = [text[:500]]
+    
+    # 2. إنشاء الشرائح (صورة لكل شريحة)
+    slide_images = []
+    for i, sent in enumerate(sentences[:10]):  # حد أقصى 10 شرائح
+        img_path = os.path.join(TEMP_DIR, f"slide_{i}.png")
+        create_slide_image(sent, i+1, img_path)
+        slide_images.append(img_path)
+    
+    # 3. تحويل النص الكامل إلى صوت
+    audio_path = os.path.join(TEMP_DIR, "audio.mp3")
+    text_to_speech(" ".join(sentences), audio_path)
+    audio = AudioFileClip(audio_path)
+    audio_duration = audio.duration
+    
+    # 4. توزيع مدة كل شريحة حسب طول الصوت
+    duration_per_slide = audio_duration / len(slide_images)
+    clips = []
+    for img_path in slide_images:
+        clip = ImageClip(img_path).set_duration(duration_per_slide).resize(height=720)
+        clips.append(clip)
+    
+    # 5. دمج الشرائح والصوت
+    video = concatenate_videoclips(clips, method="compose")
+    video = video.set_audio(audio)
+    video.write_videofile(output_video, fps=24, codec='libx264', audio_codec='aac', threads=2)
+    
+    return output_video
+
+# ========== أوامر البوت ==========
 @bot.message_handler(commands=['start'])
-def start_cmd(message):
-    if not is_sub(message.chat.id):
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("اشترك بالقناة", url=CH_LINK))
-        markup.add(InlineKeyboardButton("تحقق", callback_data="verify"))
-        bot.send_message(message.chat.id, "يجب الاشتراك في القناة أولاً.", reply_markup=markup)
-        return
-    bot.send_message(message.chat.id, "مرحباً! استخدم الأزرار أدناه.", reply_markup=main_menu())
-    show_buttons(message)
+def start_command(message):
+    bot.send_message(message.chat.id, 
+        "🎥 أرسل لي نصًا (أو ملف نصي) وسأحوله إلى فيديو تعليمي.\n\n"
+        "ملاحظة: الفيديو سيكون بسيطًا (نص متحرك + صوت). الحد الأقصى للنص 3000 حرف.")
 
-@bot.callback_query_handler(func=lambda call: call.data == "verify")
-def verify_callback(call):
-    if is_sub(call.message.chat.id):
-        bot.answer_callback_query(call.id, "تم التحقق")
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-        bot.send_message(call.message.chat.id, "مرحباً", reply_markup=main_menu())
-        show_buttons(call.message)
-    else:
-        bot.answer_callback_query(call.id, "لم تشترك بعد", show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("btn_"))
-def button_click(call):
-    btn_id = int(call.data.split("_")[1])
-    c.execute("SELECT type, content FROM buttons WHERE id=?", (btn_id,))
-    row = c.fetchone()
-    if row:
-        typ, cont = row
-        if typ == "text":
-            bot.send_message(call.message.chat.id, cont)
-        elif typ == "photo":
-            bot.send_photo(call.message.chat.id, cont)
-        elif typ == "video":
-            bot.send_video(call.message.chat.id, cont)
-        elif typ == "doc":
-            bot.send_document(call.message.chat.id, cont)
-        elif typ == "link":
-            # already handled by url button
-            pass
-
-# إضافة زر
-@bot.message_handler(func=lambda m: m.text == "➕ إضافة زر")
-def add_button_start(m):
-    if not is_sub(m.chat.id):
-        start_cmd(m)
-        return
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("نصي", callback_data="new_text"))
-    markup.add(InlineKeyboardButton("صورة", callback_data="new_photo"))
-    markup.add(InlineKeyboardButton("فيديو", callback_data="new_video"))
-    markup.add(InlineKeyboardButton("ملف", callback_data="new_doc"))
-    markup.add(InlineKeyboardButton("رابط", callback_data="new_link"))
-    bot.send_message(m.chat.id, "اختر نوع الزر:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("new_"))
-def new_button_type(call):
-    typ = call.data.split("_")[1]
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.message.chat.id, "أرسل المحتوى (نص، رابط، أو معرف الملف):")
-    bot.register_next_step_handler(msg, lambda m: get_content(m, typ))
-
-def get_content(message, typ):
-    content = message.text.strip()
-    msg = bot.send_message(message.chat.id, "أرسل النص الذي سيظهر على الزر:")
-    bot.register_next_step_handler(msg, lambda m: save_button(m, typ, content))
-
-def save_button(message, typ, content):
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
     text = message.text.strip()
-    c.execute("SELECT COUNT(*) FROM buttons")
-    count = c.fetchone()[0]
-    if count >= 50:
-        bot.send_message(message.chat.id, "لا يمكنك إضافة أكثر من 50 زراً.")
+    if len(text) > 3000:
+        bot.reply_to(message, "❌ النص طويل جدًا. الرجاء إرسال نص أقل من 3000 حرف.")
         return
-    c.execute("INSERT INTO buttons (text, type, content) VALUES (?,?,?)", (text, typ, content))
-    conn.commit()
-    bot.send_message(message.chat.id, "✅ تمت إضافة الزر.")
-
-# تعديل زر
-@bot.message_handler(func=lambda m: m.text == "✏️ تعديل زر")
-def edit_button_list(m):
-    if not is_sub(m.chat.id):
-        start_cmd(m)
+    if len(text) < 50:
+        bot.reply_to(message, "❌ النص قصير جدًا. يرجى إرسال نص أطول (على الأقل 50 حرفًا).")
         return
-    c.execute("SELECT id, text FROM buttons")
-    rows = c.fetchall()
-    if not rows:
-        bot.send_message(m.chat.id, "لا توجد أزرار.")
-        return
-    markup = InlineKeyboardMarkup()
-    for row in rows:
-        btn_id, btn_text = row
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"edit_{{btn_id}}"))
-    bot.send_message(m.chat.id, "اختر الزر لتعديل نصه:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("edit_"))
-def edit_choice(call):
-    btn_id = int(call.data.split("_")[1])
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(call.message.chat.id, "أرسل النص الجديد للزر:")
-    bot.register_next_step_handler(msg, lambda m: update_text(m, btn_id))
-
-def update_text(message, btn_id):
-    new_text = message.text.strip()
-    c.execute("UPDATE buttons SET text=? WHERE id=?", (new_text, btn_id))
-    conn.commit()
-    bot.send_message(message.chat.id, "✅ تم تعديل الزر.")
-
-# حذف زر
-@bot.message_handler(func=lambda m: m.text == "🗑️ حذف زر")
-def delete_button_list(m):
-    if not is_sub(m.chat.id):
-        start_cmd(m)
-        return
-    c.execute("SELECT id, text FROM buttons")
-    rows = c.fetchall()
-    if not rows:
-        bot.send_message(m.chat.id, "لا توجد أزرار.")
-        return
-    markup = InlineKeyboardMarkup()
-    for row in rows:
-        btn_id, btn_text = row
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"del_{{btn_id}}"))
-    bot.send_message(m.chat.id, "اختر الزر لحذفه:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("del_"))
-def delete_btn(call):
-    btn_id = int(call.data.split("_")[1])
-    c.execute("DELETE FROM buttons WHERE id=?", (btn_id,))
-    conn.commit()
-    bot.answer_callback_query(call.id, "تم حذف الزر", show_alert=True)
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-
-# تغيير اللغة
-@bot.message_handler(func=lambda m: m.text == "🌐 تغيير اللغة")
-def change_lang(m):
-    if not is_sub(m.chat.id):
-        start_cmd(m)
-        return
-    # لغة بسيطة: نخزن في جدول منفصل
-    conn2 = sqlite3.connect("child_data.db")
-    c2 = conn2.cursor()
-    c2.execute("CREATE TABLE IF NOT EXISTS cfg (key TEXT PRIMARY KEY, value TEXT)")
-    c2.execute("SELECT value FROM cfg WHERE key='lang'")
-    row = c2.fetchone()
-    current = row[0] if row else "ar"
-    new = "en" if current == "ar" else "ar"
-    c2.execute("REPLACE INTO cfg (key,value) VALUES (?,?)", ("lang", new))
-    conn2.commit()
-    conn2.close()
-    bot.send_message(m.chat.id, "✅ تم تغيير اللغة" if new == "en" else "✅ Language changed")
-
-print("البوت الابن يعمل...")
-bot.infinity_polling()
-'''
-    return code
-
-def run_child(token, username):
-    ch = get_channel()
-    code = generate_child_code(token, username, OWNER_ID, ch["link"], ch["username"])
-    os.makedirs("child_bots", exist_ok=True)
-    filename = f"child_bots/{username}.py"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(code)
-    subprocess.Popen(["python", filename])
-
-# ========== أوامر البوت الرئيسي ==========
-@main_bot.message_handler(commands=['start'])
-def start_main(m):
-    uid = m.chat.id
-    create_user(uid)
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("➕ صنع بوت", callback_data="new"), InlineKeyboardButton("📋 بوتاتي", callback_data="list"))
-    if uid == OWNER_ID:
-        markup.add(InlineKeyboardButton("⚙️ لوحة التحكم", callback_data="admin"))
-    main_bot.send_message(uid, "مرحباً بك في مصنع البوتات", reply_markup=markup)
-
-@main_bot.callback_query_handler(func=lambda call: True)
-def main_callback(call):
-    uid = call.message.chat.id
-    data = call.data
-    if data == "new":
-        ch = get_channel()
-        if ch["link"] and not is_subscribed(uid, ch["username"]):
-            mk = InlineKeyboardMarkup()
-            mk.add(InlineKeyboardButton("اشترك", url=ch["link"]), InlineKeyboardButton("تحقق", callback_data="verify_new"))
-            main_bot.send_message(uid, f"اشترك أولاً: {ch['link']}", reply_markup=mk)
-            return
-        user = get_user(uid)
-        if uid != OWNER_ID and (not user or len(user["created_bots"]) >= user["bots_limit"] or not user["can_create"]):
-            main_bot.answer_callback_query(call.id, "غير مسموح", show_alert=True)
-            return
-        main_bot.send_message(uid, "أرسل توكن البوت الجديد (من @BotFather):")
-        main_bot.register_next_step_handler(call.message, process_token)
-    elif data == "list":
-        user = get_user(uid)
-        if not user or not user["created_bots"]:
-            main_bot.send_message(uid, "ليس لديك أي بوتات.")
-            return
-        txt = "بوتاتك:\n"
-        for b in user["created_bots"]:
-            txt += f"- @{b['username']}\n"
-        main_bot.send_message(uid, txt)
-    elif data == "admin" and uid == OWNER_ID:
-        show_admin(uid)
-    elif data == "verify_new":
-        ch = get_channel()
-        if is_subscribed(uid, ch["username"]):
-            main_bot.answer_callback_query(call.id, "تم التحقق")
-            main_bot.edit_message_reply_markup(uid, call.message.message_id, reply_markup=None)
-            main_bot.send_message(uid, "أرسل توكن البوت الجديد:")
-            main_bot.register_next_step_handler(call.message, process_token)
-        else:
-            main_bot.answer_callback_query(call.id, "لم تشترك بعد", show_alert=True)
-
-def process_token(m):
-    token = m.text.strip().replace(" ", "")
+    
+    # إرسال رسالة انتظار
+    msg = bot.reply_to(message, "⏳ جاري تحويل النص إلى فيديو... قد يستغرق دقيقة.")
+    
     try:
-        test = telebot.TeleBot(token)
-        me = test.get_me()
-        add_bot(m.chat.id, token, me.username)
-        run_child(token, me.username)
-        main_bot.send_message(m.chat.id, f"✅ تم إنشاء وتشغيل البوت @{me.username}")
+        # إنشاء اسم فريد للفيديو
+        filename = f"lecture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        video_path = os.path.join(TEMP_DIR, filename)
+        
+        # تحويل
+        create_video_from_text(text, video_path)
+        
+        # إرسال الفيديو
+        with open(video_path, 'rb') as vid:
+            bot.send_video(message.chat.id, vid, caption="✅ تم تحويل المحاضرة إلى فيديو.", supports_streaming=True)
+        
+        # تنظيف الملفات
+        os.remove(video_path)
+        for f in os.listdir(TEMP_DIR):
+            if f.endswith(('.png', '.mp3')):
+                os.remove(os.path.join(TEMP_DIR, f))
+                
     except Exception as e:
-        main_bot.send_message(m.chat.id, f"❌ فشل: {str(e)[:200]}")
+        bot.edit_message_text(f"❌ حدث خطأ: {str(e)[:200]}", message.chat.id, msg.message_id)
+        print(f"Error: {e}")
 
-def show_admin(uid):
-    ch = get_channel()
-    status = f"القناة: {ch['link']}" if ch['link'] else "لا توجد قناة محددة"
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🔗 تعيين قناة", callback_data="admin_set_ch"))
-    markup.add(InlineKeyboardButton("📋 جميع البوتات", callback_data="admin_list"))
-    markup.add(InlineKeyboardButton("🗑️ إزالة حقوق بوت", callback_data="admin_rm"))
-    markup.add(InlineKeyboardButton("➕ السماح لمستخدم", callback_data="admin_allow"))
-    markup.add(InlineKeyboardButton("🚫 منع مستخدم", callback_data="admin_block"))
-    markup.add(InlineKeyboardButton("📢 بث", callback_data="admin_broad"))
-    main_bot.send_message(uid, f"لوحة التحكم\n{status}", reply_markup=markup)
-
-@main_bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
-def admin_actions(call):
-    uid = call.message.chat.id
-    if uid != OWNER_ID:
-        return
-    act = call.data.split("_")[1]
-    if act == "set_ch":
-        main_bot.send_message(uid, "أرسل رابط القناة (مثال: https://t.me/username):")
-        main_bot.register_next_step_handler(call.message, set_channel_step)
-    elif act == "list":
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT username, owner_id FROM bots")
-        rows = c.fetchall()
-        conn.close()
-        if not rows:
-            main_bot.send_message(uid, "لا توجد بوتات.")
+@bot.message_handler(content_types=['document'])
+def handle_document(message):
+    # استقبال ملف نصي
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        text = downloaded_file.decode('utf-8')
+        if len(text) > 5000:
+            bot.reply_to(message, "❌ الملف كبير جدًا. حد أقصى 5000 حرف.")
             return
-        txt = "قائمة البوتات:\n"
-        for un, oid in rows:
-            txt += f"@{un} (المالك: {oid})\n"
-        main_bot.send_message(uid, txt)
-    elif act == "rm":
-        main_bot.send_message(uid, "أرسل معرف البوت (username بدون @):")
-        main_bot.register_next_step_handler(call.message, remove_rights_step)
-    elif act == "allow":
-        main_bot.send_message(uid, "أرسل ID المستخدم:")
-        main_bot.register_next_step_handler(call.message, allow_user_step)
-    elif act == "block":
-        main_bot.send_message(uid, "أرسل ID المستخدم:")
-        main_bot.register_next_step_handler(call.message, block_user_step)
-    elif act == "broad":
-        main_bot.send_message(uid, "أرسل الرسالة التي تريد بثها:")
-        main_bot.register_next_step_handler(call.message, broadcast_step)
+        # إعادة استخدام نفس الدالة
+        msg = bot.reply_to(message, "⏳ جاري تحويل الملف إلى فيديو...")
+        filename = f"lecture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        video_path = os.path.join(TEMP_DIR, filename)
+        create_video_from_text(text, video_path)
+        with open(video_path, 'rb') as vid:
+            bot.send_video(message.chat.id, vid, caption="✅ تم تحويل الملف النصي إلى فيديو.", supports_streaming=True)
+        os.remove(video_path)
+        for f in os.listdir(TEMP_DIR):
+            if f.endswith(('.png', '.mp3')):
+                os.remove(os.path.join(TEMP_DIR, f))
+    except Exception as e:
+        bot.reply_to(message, f"❌ فشل معالجة الملف: {str(e)[:200]}")
 
-def set_channel_step(m):
-    link = m.text.strip()
-    match = re.search(r't\.me/([A-Za-z0-9_]+)', link)
-    if not match:
-        main_bot.send_message(OWNER_ID, "❌ رابط غير صالح.")
-        return
-    uname = match.group(1)
-    set_channel(link, uname)
-    main_bot.send_message(OWNER_ID, f"✅ تم تعيين القناة: {link}\nمعرف القناة: @{uname}")
-
-def remove_rights_step(m):
-    uname = m.text.strip().replace("@", "")
-    main_bot.send_message(OWNER_ID, f"✅ تم إزالة الحقوق من @{uname} (يمكنك إعادة تشغيل البوت إذا أردت تطبيقياً)")
-
-def allow_user_step(m):
-    try:
-        uid = int(m.text.strip())
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("UPDATE users SET bots_limit = bots_limit + 1 WHERE user_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        main_bot.send_message(OWNER_ID, f"✅ تم السماح للمستخدم {uid} بصنع بوت إضافي")
-    except:
-        main_bot.send_message(OWNER_ID, "❌ خطأ في الإدخال")
-
-def block_user_step(m):
-    try:
-        uid = int(m.text.strip())
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("UPDATE users SET can_create = 0 WHERE user_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        main_bot.send_message(OWNER_ID, f"✅ تم منع المستخدم {uid} من صنع البوتات")
-    except:
-        main_bot.send_message(OWNER_ID, "❌ خطأ")
-
-def broadcast_step(m):
-    text = m.text
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users")
-    users = c.fetchall()
-    conn.close()
-    count = 0
-    for (uid,) in users:
-        try:
-            main_bot.send_message(uid, f"📢 رسالة من المالك:\n{text}")
-            count += 1
-        except:
-            pass
-    main_bot.send_message(OWNER_ID, f"✅ تم إرسال الرسالة إلى {count} مستخدم.")
-
+# ========== التشغيل ==========
 if __name__ == "__main__":
-    print("✅ البوت الرئيسي يعمل...")
-    main_bot.remove_webhook()
-    main_bot.infinity_polling()
+    print("✅ بوت تحويل النص إلى فيديو يعمل...")
+    bot.remove_webhook()
+    bot.infinity_polling()
