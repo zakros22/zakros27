@@ -1,10 +1,13 @@
 import os
 import telebot
-import subprocess
 import tempfile
+import subprocess
+import re
 from datetime import datetime
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
+import PyPDF2
+import docx
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -12,24 +15,60 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-def create_image_with_text(text, output_image):
-    """إنشاء صورة واحدة تحتوي على النص"""
+def extract_text_from_file(file_path):
+    """استخراج النص من ملف (txt, pdf, docx)"""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.txt':
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    elif ext == '.pdf':
+        text = ""
+        with open(file_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                text += page.extract_text()
+        return text
+    elif ext == '.docx':
+        doc = docx.Document(file_path)
+        return "\n".join([para.text for para in doc.paragraphs])
+    else:
+        raise Exception("نوع ملف غير مدعوم. أرسل txt, pdf, أو docx.")
+
+def split_text_into_chunks(text, max_chars=250):
+    """تقسيم النص إلى أجزاء قصيرة (لكل شريحة)"""
+    sentences = re.split(r'(?<=[.!?؟]) +', text)
+    chunks = []
+    current = ""
+    for sent in sentences:
+        if len(current) + len(sent) + 1 <= max_chars:
+            current += " " + sent if current else sent
+        else:
+            if current:
+                chunks.append(current)
+            current = sent
+    if current:
+        chunks.append(current)
+    if not chunks:
+        chunks = [text[:max_chars]]
+    return chunks[:8]  # حد أقصى 8 شرائح للسرعة
+
+def create_slide_image(text, index, output_path):
+    """إنشاء صورة شريحة بخلفية ونص"""
     width, height = 1280, 720
-    img = Image.new('RGB', (width, height), color=(20, 30, 80))
+    img = Image.new('RGB', (width, height), color=(20, 40, 70))
     draw = ImageDraw.Draw(img)
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 50)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 45)
     except:
         font = ImageFont.load_default()
     
     # تقسيم النص إلى أسطر
-    lines = []
     words = text.split()
+    lines = []
     line = ""
     for w in words:
-        test_line = line + " " + w if line else w
-        if len(test_line) <= 35:
-            line = test_line
+        if len(line + " " + w) <= 35:
+            line += " " + w if line else w
         else:
             lines.append(line)
             line = w
@@ -39,59 +78,110 @@ def create_image_with_text(text, output_image):
     y = 250
     for l in lines:
         draw.text((100, y), l, fill=(255,255,255), font=font)
-        y += 70
-    img.save(output_image)
+        y += 60
+    
+    draw.text((1150, 650), f"{index}", fill=(200,200,200), font=font)
+    img.save(output_path)
 
-def text_to_video_simple(text, output_video):
-    """تحويل النص إلى فيديو (صورة + صوت) باستخدام ffmpeg"""
+def text_to_video(text, output_video):
+    """تحويل النص إلى فيديو (صوت + شرائح)"""
+    chunks = split_text_into_chunks(text)
+    if not chunks:
+        raise Exception("لا يوجد نص صالح للتحويل")
+    
     with tempfile.TemporaryDirectory() as tmpdir:
-        img_path = os.path.join(tmpdir, "slide.png")
+        # إنشاء الشرائح
+        slide_paths = []
+        for i, chunk in enumerate(chunks):
+            img_path = os.path.join(tmpdir, f"slide_{i}.png")
+            create_slide_image(chunk, i+1, img_path)
+            slide_paths.append(img_path)
+        
+        # إنشاء الصوت من النص الكامل (مختصر)
+        full_text = " ".join(chunks)
         audio_path = os.path.join(tmpdir, "audio.mp3")
-        
-        # إنشاء الصورة
-        create_image_with_text(text, img_path)
-        
-        # إنشاء الصوت
-        tts = gTTS(text=text, lang='ar', slow=False)
+        tts = gTTS(text=full_text[:3000], lang='ar', slow=False)
         tts.save(audio_path)
         
-        # دمج الصورة والصوت باستخدام ffmpeg
+        # حساب مدة الصوت
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path], capture_output=True, text=True)
+        audio_duration = float(result.stdout.strip())
+        
+        duration_per_slide = audio_duration / len(slide_paths)
+        
+        # إنشاء فيديو باستخدام ffmpeg (دمج كل شريحة مع الصوت)
+        # سنستخدم concat demuxer لدمج الصور مع الصوت
+        concat_file = os.path.join(tmpdir, "concat.txt")
+        with open(concat_file, 'w') as f:
+            for img_path in slide_paths:
+                f.write(f"file '{img_path}'\nduration {duration_per_slide}\n")
+        # آخر صورة تحتاج إلى نهاية
+        with open(concat_file, 'a') as f:
+            f.write(f"file '{slide_paths[-1]}'\n")
+        
         cmd = [
             'ffmpeg', '-y',
-            '-loop', '1',
-            '-i', img_path,
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', concat_file,
             '-i', audio_path,
             '-c:v', 'libx264',
-            '-tune', 'stillimage',
-            '-c:a', 'aac',
-            '-b:a', '192k',
             '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
             '-shortest',
             output_video
         ]
         subprocess.run(cmd, check=True, capture_output=True)
+    
     return output_video
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     bot.send_message(message.chat.id,
-        "🎥 أرسل لي نصاً (حد أقصى 200 حرف) وسأحوله إلى فيديو تعليمي.\n"
-        "مثال: أرسل 'مرحباً، هذا فيديو تجريبي'")
+        "🎥 أرسل لي ملفاً (txt, pdf, docx) أو نصاً قصيراً وسأحوله إلى فيديو تعليمي.\n\n"
+        "📌 ملاحظات:\n"
+        "- الحد الأقصى للنص: 2000 حرف (للحصول على فيديو سريع)\n"
+        "- الفيديو سيكون عبارة عن شرائح نصية + صوت\n"
+        "- قد يستغرق التحويل 30-60 ثانية حسب طول النص")
 
-@bot.message_handler(func=lambda m: True)
+@bot.message_handler(content_types=['document'])
+def handle_doc(message):
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(message.document.file_name)[1]) as tmp:
+            tmp.write(downloaded)
+            tmp_path = tmp.name
+        text = extract_text_from_file(tmp_path)
+        os.unlink(tmp_path)
+        if len(text) > 2500:
+            bot.reply_to(message, "❌ النص في الملف طويل جداً (حد أقصى 2500 حرف).")
+            return
+        if len(text) < 50:
+            bot.reply_to(message, "❌ النص قصير جداً.")
+            return
+        msg = bot.reply_to(message, "⏳ جاري تحويل الملف إلى فيديو... (قد يستغرق دقيقة)")
+        out_file = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        text_to_video(text, out_file)
+        with open(out_file, 'rb') as f:
+            bot.send_video(message.chat.id, f, caption="✅ تم تحويل الملف إلى فيديو!", supports_streaming=True)
+        os.remove(out_file)
+    except Exception as e:
+        bot.reply_to(message, f"❌ فشل: {str(e)[:200]}")
+
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
 def handle_text(message):
     text = message.text.strip()
-    if len(text) > 200:
-        bot.reply_to(message, "❌ النص طويل جداً. الرجاء إرسال نص أقل من 200 حرف.")
+    if len(text) > 2000:
+        bot.reply_to(message, "❌ النص طويل جداً (حد أقصى 2000 حرف).")
         return
-    if len(text) < 20:
-        bot.reply_to(message, "❌ النص قصير جداً. أرسل نصاً أطول (20 حرفاً على الأقل).")
+    if len(text) < 50:
+        bot.reply_to(message, "❌ النص قصير جداً (يحتاج 50 حرفاً على الأقل).")
         return
-    
-    msg = bot.reply_to(message, "⏳ جاري تحويل النص إلى فيديو... (قد يستغرق 10-20 ثانية)")
+    msg = bot.reply_to(message, "⏳ جاري تحويل النص إلى فيديو...")
     try:
         out_file = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        text_to_video_simple(text, out_file)
+        text_to_video(text, out_file)
         with open(out_file, 'rb') as f:
             bot.send_video(message.chat.id, f, caption="✅ تم إنشاء الفيديو!", supports_streaming=True)
         os.remove(out_file)
@@ -99,6 +189,6 @@ def handle_text(message):
         bot.edit_message_text(f"❌ خطأ: {str(e)[:200]}", message.chat.id, msg.message_id)
 
 if __name__ == "__main__":
-    print("✅ البوت يعمل...")
+    print("✅ بوت تحويل النص إلى فيديو يعمل...")
     bot.remove_webhook()
     bot.infinity_polling()
