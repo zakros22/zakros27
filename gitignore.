@@ -1,7 +1,0 @@
-temp_videos/
-__pycache__/
-*.pyc
-.env
-*.mp4
-*.png
-*.mp3
