@@ -14,13 +14,12 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# اللغات المتاحة
+# اللغات المدعومة
 LANGUAGES = {
-    "ar": "🇸🇦 العربية",
-    "en": "🇬🇧 English",
-    "fr": "🇫🇷 Français",
-    "tr": "🇹🇷 Türkçe",
-    "fa": "🇮🇷 فارسی"
+    "ar": "العربية",
+    "en": "English",
+    "fr": "Francais",
+    "tr": "Turkce"
 }
 
 user_sessions = {}
@@ -47,50 +46,43 @@ def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
             translated_parts.append(translator.translate(chunk))
             if (i+1) % 5 == 0 or i+1 == total:
                 if user_id:
-                    bot.send_message(user_id, f"⏳ الترجمة: {i+1}/{total} جزء")
+                    bot.send_message(user_id, f"Progress: {i+1}/{total} parts")
         except Exception as e:
-            translated_parts.append(f"[خطأ في الجزء {i+1}]")
+            translated_parts.append(f"[Error part {i+1}]")
         time.sleep(0.3)
     return " ".join(translated_parts)
 
 def create_bilingual_pdf(original, translated, output_path):
     pdf = FPDF()
     pdf.add_page()
-    # محاولة استخدام خط يدعم العربية بشكل جيد
+    # Use a font that supports Arabic (DejaVu is available on Heroku)
     try:
-        # في Heroku، قد يكون هذا المسار موجوداً
         pdf.add_font('DejaVu', '', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', uni=True)
         pdf.set_font('DejaVu', '', 12)
     except:
-        # خط احتياطي (Arial Unicode MS يدعم العربية أيضاً)
-        pdf.add_font('Arial', '', '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', uni=True)
-        pdf.set_font('Arial', '', 12)
+        pdf.set_font('Helvetica', '', 12)
     
-    # النص الأصلي (بالأزرق)
     pdf.set_text_color(0, 0, 150)
-    pdf.cell(0, 10, "النص الأصلي:", ln=1)
+    pdf.cell(0, 10, "Original text:", ln=1)
     pdf.set_text_color(0, 0, 0)
     pdf.multi_cell(0, 8, original)
     pdf.ln(8)
     
-    # النص المترجم (بالأخضر)
     pdf.set_text_color(0, 100, 0)
-    pdf.cell(0, 10, "النص المترجم:", ln=1)
+    pdf.cell(0, 10, "Translated text:", ln=1)
     pdf.set_text_color(0, 0, 0)
     pdf.multi_cell(0, 8, translated)
     
-    # تذييل الحقوق في كل صفحة (يظهر في الأسفل)
     pdf.set_y(-30)
     pdf.set_font_size(9)
     pdf.set_text_color(128, 128, 128)
-    pdf.cell(0, 10, "تمت الترجمة بواسطة @zakros_onlinebot", 0, 0, 'C')
-    
+    pdf.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
     pdf.output(output_path)
 
 def process_translation(user_id, target_lang, target_name):
     session = user_sessions.get(user_id)
     if not session:
-        bot.send_message(user_id, "❌ انتهت الجلسة، أعد إرسال النص/الملف.")
+        bot.send_message(user_id, "Session expired. Please resend the file/text.")
         return
 
     original_text = session["text"]
@@ -104,13 +96,13 @@ def process_translation(user_id, target_lang, target_name):
             bot.send_document(
                 user_id,
                 f,
-                caption=f"✅ تمت الترجمة إلى {target_name}\n@zakros_onlinebot",
+                caption=f"Translation to {target_name} completed. @zakros_onlinebot",
                 visible_file_name=f"{original_filename}_{target_lang}.pdf"
             )
         os.unlink(pdf_path)
         del user_sessions[user_id]
     except Exception as e:
-        bot.send_message(user_id, f"❌ فشلت الترجمة: {str(e)[:200]}")
+        bot.send_message(user_id, f"Translation failed: {str(e)[:200]}")
         if user_id in user_sessions:
             del user_sessions[user_id]
 
@@ -118,21 +110,20 @@ def process_translation(user_id, target_lang, target_name):
 def start(message):
     bot.send_message(
         message.chat.id,
-        "📄 *بوت ترجمة النصوص إلى PDF*\n\nأرسل ملف `.txt` أو اكتب نصاً، وسأترجمه إلى اللغة التي تختارها.\nسأرسل لك PDF منسقاً مع حقوق البوت.\n\n@zakros_onlinebot",
-        parse_mode="Markdown"
+        "Send me a .txt file or a text message. I will translate it and send you a PDF.\nBot credit: @zakros_onlinebot"
     )
 
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     if not message.document.file_name.endswith('.txt'):
-        bot.reply_to(message, "❌ أرسل ملف `.txt` فقط.")
+        bot.reply_to(message, "Please send a .txt file only.")
         return
     try:
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
         text = downloaded.decode('utf-8')
         if len(text.strip()) < 5:
-            bot.reply_to(message, "❌ النص قصير جدًا.")
+            bot.reply_to(message, "Text is too short.")
             return
         user_sessions[message.chat.id] = {
             "text": text,
@@ -141,15 +132,15 @@ def handle_doc(message):
         markup = InlineKeyboardMarkup()
         for code, name in LANGUAGES.items():
             markup.add(InlineKeyboardButton(name, callback_data=code))
-        bot.send_message(message.chat.id, "✨ اختر اللغة:", reply_markup=markup)
+        bot.send_message(message.chat.id, "Choose target language:", reply_markup=markup)
     except Exception as e:
-        bot.reply_to(message, f"❌ خطأ: {str(e)[:100]}")
+        bot.reply_to(message, f"Error: {str(e)[:100]}")
 
 @bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
 def handle_text(message):
     text = message.text.strip()
     if len(text) < 5:
-        bot.reply_to(message, "❌ النص قصير جدًا.")
+        bot.reply_to(message, "Text is too short.")
         return
     user_sessions[message.chat.id] = {
         "text": text,
@@ -158,7 +149,7 @@ def handle_text(message):
     markup = InlineKeyboardMarkup()
     for code, name in LANGUAGES.items():
         markup.add(InlineKeyboardButton(name, callback_data=code))
-    bot.send_message(message.chat.id, "✨ اختر اللغة:", reply_markup=markup)
+    bot.send_message(message.chat.id, "Choose target language:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data in LANGUAGES)
 def translate_callback(call):
@@ -167,18 +158,18 @@ def translate_callback(call):
     target_name = LANGUAGES[target_lang]
 
     if user_id not in user_sessions:
-        bot.answer_callback_query(call.id, "انتهت الجلسة، أعد إرسال النص/الملف.", show_alert=True)
+        bot.answer_callback_query(call.id, "Session expired. Resend file/text.", show_alert=True)
         return
 
-    bot.answer_callback_query(call.id, f"جاري الترجمة إلى {target_name}...")
+    bot.answer_callback_query(call.id, f"Translating to {target_name}...")
     bot.edit_message_reply_markup(user_id, call.message.message_id, reply_markup=None)
-    bot.send_message(user_id, f"⏳ بدء الترجمة إلى {target_name}... قد يستغرق عدة دقائق حسب حجم النص.")
+    bot.send_message(user_id, f"Starting translation to {target_name}. This may take a few minutes for long texts.")
 
     thread = threading.Thread(target=process_translation, args=(user_id, target_lang, target_name))
     thread.daemon = True
     thread.start()
 
 if __name__ == "__main__":
-    print("✅ البوت يعمل...")
+    print("Bot is running...")
     bot.remove_webhook()
     bot.infinity_polling()
