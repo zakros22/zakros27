@@ -19,9 +19,8 @@ OWNER_ID = 7021542402
 DB_NAME = "bot_data.db"
 
 def get_db_connection():
-    """إنشاء اتصال آمن بقاعدة البيانات"""
     conn = sqlite3.connect(DB_NAME, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")  # تحسين الأداء وتقليل الأقفال
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 def init_db():
@@ -124,7 +123,6 @@ LANGUAGES = {
 user_sessions = {}
 
 def translate_text(text, target_lang):
-    """ترجمة النص مع ضمان الترميز الصحيح"""
     translator = GoogleTranslator(source='auto', target=target_lang)
     try:
         result = translator.translate(text)
@@ -132,7 +130,7 @@ def translate_text(text, target_lang):
     except Exception as e:
         raise Exception(f"Translation error: {e}")
 
-# ========== 3. أوامر البوت ==========
+# ========== 3. أوامر البوت (بدون parse_mode) ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
@@ -144,14 +142,13 @@ def start_cmd(message):
             bot.send_message(user_id, "✅ تم تفعيل الإحالة! حصل الداعم على نقطة.")
     user = get_user(user_id)
     bot.send_message(user_id,
-        f"🌍 *بوت الترجمة الذكي*\n\n"
+        f"🌍 بوت الترجمة الذكي\n\n"
         f"• أرسل ملف .txt أو نصاً لأترجمه لك.\n"
         f"• رصيدك: {user['points']} نقطة\n"
         f"• كل ترجمة = 1 نقطة.\n"
         f"• احصل على نقاط: /share (كل 4 مشاركات = نقطة) أو عبر الإحالة:\n"
         f"  https://t.me/{bot.get_me().username}?start={user_id}\n\n"
-        f"📌 البوت: @zakros_onlinebot",
-        parse_mode="Markdown"
+        f"📌 البوت: @zakros_onlinebot"
     )
 
 @bot.message_handler(commands=['share'])
@@ -280,11 +277,11 @@ def translate_callback(call):
             update_points(user_id, -1)
             new_points = get_user(user_id)["points"]
             
-            response = f"📝 *النص الأصلي:*\n{text}\n\n"
-            response += f"🌍 *الترجمة إلى {target_name}:*\n{translated}\n\n"
+            response = f"📝 النص الأصلي:\n{text}\n\n"
+            response += f"🌍 الترجمة إلى {target_name}:\n{translated}\n\n"
             response += f"⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot"
             
-            bot.send_message(user_id, response, parse_mode="Markdown")
+            bot.send_message(user_id, response)
             bot.delete_message(user_id, msg.message_id)
             del user_sessions[user_id]
         except Exception as e:
