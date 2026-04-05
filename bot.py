@@ -6,7 +6,9 @@ import json
 import tempfile
 import string
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
+import threading
 from fpdf import FPDF
 import difflib
 import re
@@ -48,7 +50,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS exams (
     answers TEXT,
     link_code TEXT UNIQUE,
     created_by INTEGER,
-    created_at TEXT
+    created_at TEXT,
+    time_limit INTEGER DEFAULT 0
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -73,26 +76,26 @@ c.execute('''CREATE TABLE IF NOT EXISTS referrals (
 )''')
 conn.commit()
 
-def add_exam(title, questions, answers, created_by):
+def add_exam(title, questions, answers, created_by, time_limit):
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at) VALUES (?,?,?,?,?,?)",
-              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat()))
+    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at, time_limit) VALUES (?,?,?,?,?,?,?)",
+              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat(), time_limit))
     conn.commit()
     return c.lastrowid, code
 
 def get_exam_by_code(code):
-    c.execute("SELECT id, title, questions, answers, created_by FROM exams WHERE link_code=?", (code,))
+    c.execute("SELECT id, title, questions, answers, created_by, time_limit FROM exams WHERE link_code=?", (code,))
     row = c.fetchone()
     if row:
-        return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4]}
+        return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4], "time_limit": row[5]}
     return None
 
 def get_exams_by_user(user_id):
-    c.execute("SELECT id, title, link_code, created_at FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
+    c.execute("SELECT id, title, link_code, created_at, time_limit FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
     return c.fetchall()
 
 def get_all_exams_by_teacher(teacher_id):
-    c.execute("SELECT id, title, link_code, created_at FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
+    c.execute("SELECT id, title, link_code, created_at, time_limit FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
     return c.fetchall()
 
 def save_result(exam_id, student_id, score, total, percentage, details):
@@ -126,12 +129,10 @@ def add_share(user_id):
     conn.commit()
 
 def add_referral(referrer_id, referred_id):
-    # التحقق مما إذا كان المستخدم المُحال قد سجل من قبل عبر رابط إحالة
     c.execute("SELECT * FROM referrals WHERE referred_id=?", (referred_id,))
     existing = c.fetchone()
     if existing:
         return False
-    
     c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?,?,?)", 
               (referrer_id, referred_id, datetime.now().isoformat()))
     update_points(referrer_id, 0.25)
@@ -245,7 +246,7 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.cell(0, 10, advice_text, 0, 1, 'C')
     pdf.ln(10)
     
-    # مربع حقوق البوت @ZeQuiz_Bot
+    # مربع حقوق البوت
     pdf.set_fill_color(230, 240, 255)
     pdf.rect(50, 230, 110, 25, 'F')
     pdf.set_draw_color(0, 102, 204)
@@ -270,7 +271,6 @@ def start(message):
     user_id = message.chat.id
     user = get_user(user_id)
     
-    # معالجة الإحالة (مرة واحدة فقط لكل مستخدم)
     if len(message.text.split()) > 1:
         ref = message.text.split()[1]
         if ref.isdigit() and int(ref) != user_id:
@@ -313,8 +313,9 @@ def my_exams(call):
         bot.send_message(user_id, "📭 لم تقم بإنشاء أي اختبارات بعد.")
         return
     txt = "📋 قائمة الاختبارات التي أنشأتها:\n\n"
-    for eid, title, code, created_at in exams:
-        txt += f"• {title}\n   رمز: {code}\n   تاريخ: {created_at[:19]}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+    for eid, title, code, created_at, time_limit in exams:
+        time_text = f"{time_limit} ثانية" if time_limit > 0 else "بدون وقت محدد"
+        txt += f"• {title}\n   رمز: {code}\n   الوقت: {time_text}\n   تاريخ: {created_at[:19]}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
     bot.send_message(user_id, txt)
 
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
@@ -341,7 +342,9 @@ def start_exam(user_id, exam):
         "answers": exam["answers"],
         "user_ans": [],
         "scores": [],
-        "index": 0
+        "index": 0,
+        "start_time": time.time(),
+        "time_limit": exam["time_limit"]
     }
     send_question(user_id)
 
@@ -351,6 +354,21 @@ def send_question(user_id):
     data = user_answers.get(user_id)
     if not data:
         return
+    
+    # التحقق من الوقت المتبقي
+    if data["time_limit"] > 0:
+        elapsed = time.time() - data["start_time"]
+        remaining = data["time_limit"] - elapsed
+        if remaining <= 0:
+            bot.send_message(user_id, "⏰ انتهى الوقت المحدد للاختبار!")
+            finish_exam(user_id)
+            return
+        remaining_min = int(remaining // 60)
+        remaining_sec = int(remaining % 60)
+        time_msg = f"\n⏰ الوقت المتبقي: {remaining_min} دقيقة {remaining_sec} ثانية"
+    else:
+        time_msg = ""
+    
     idx = data["index"]
     if idx >= len(data["questions"]):
         finish_exam(user_id)
@@ -363,13 +381,13 @@ def send_question(user_id):
         for opt in q["options"]:
             buttons.append(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
         markup.add(*buttons)
-        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
+        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}{time_msg}", reply_markup=markup)
     elif q["type"] == "truefalse":
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ صح", callback_data="ans_صح"), InlineKeyboardButton("❌ خطأ", callback_data="ans_خطأ"))
-        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
+        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}{time_msg}", reply_markup=markup)
     else:
-        msg = bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}\n\nأجب كتابياً:")
+        msg = bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}{time_msg}\n\nأجب كتابياً:")
         bot.register_next_step_handler(msg, process_essay, user_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ans_"))
@@ -380,6 +398,14 @@ def answer_callback(call):
     if not data:
         bot.answer_callback_query(call.id, "انتهت الجلسة")
         return
+    
+    # التحقق من الوقت
+    if data["time_limit"] > 0:
+        elapsed = time.time() - data["start_time"]
+        if elapsed > data["time_limit"]:
+            bot.answer_callback_query(call.id, "انتهى الوقت!")
+            finish_exam(user_id)
+            return
     
     idx = data["index"]
     q = data["questions"][idx]
@@ -412,6 +438,14 @@ def process_essay(message, user_id):
     data = user_answers.get(user_id)
     if not data:
         return
+    
+    # التحقق من الوقت
+    if data["time_limit"] > 0:
+        elapsed = time.time() - data["start_time"]
+        if elapsed > data["time_limit"]:
+            bot.send_message(user_id, "⏰ انتهى الوقت!")
+            finish_exam(user_id)
+            return
     
     idx = data["index"]
     q = data["questions"][idx]
@@ -474,7 +508,7 @@ def share_result(call):
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, f"🎉 حصلت على نتيجة {percentage}% في اختبار @ZeQuiz_Bot!\n\nشاركها مع أصدقائك: https://t.me/{bot.get_me().username}")
 
-# ========== 4. إنشاء اختبار ==========
+# ========== 4. إنشاء اختبار (مع إضافة التوقيت) ==========
 temp_exam = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_exam")
@@ -492,8 +526,19 @@ def create_exam_start(call):
 def process_title(message):
     user_id = message.chat.id
     temp_exam[user_id]["title"] = message.text.strip()
-    temp_exam[user_id]["step"] = "question"
-    bot.send_message(user_id, "➕ أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (mcq/truefalse/text):\nمثال:\nما عاصمة فرنسا؟\ntext")
+    temp_exam[user_id]["step"] = "time_limit"
+    bot.send_message(user_id, "⏰ أرسل الوقت المحدد للإجابة على كل سؤال (بالثواني)\nمثال: 30 (أي 30 ثانية)\nأو أرسل 0 إذا لا يوجد وقت محدد:")
+
+@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "time_limit")
+def process_time_limit(message):
+    user_id = message.chat.id
+    try:
+        time_limit = int(message.text.strip())
+        temp_exam[user_id]["time_limit"] = time_limit
+        temp_exam[user_id]["step"] = "question"
+        bot.send_message(user_id, "➕ أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (mcq/truefalse/text):\nمثال:\nما عاصمة فرنسا؟\ntext")
+    except:
+        bot.send_message(user_id, "❌ أرسل رقماً صحيحاً (بالثواني). مثال: 30")
 
 @bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "question")
 def process_question(message):
@@ -585,10 +630,11 @@ def finish_creation(call):
     
     update_points(user_id, -1)
     data = temp_exam.pop(user_id)
-    eid, code = add_exam(data["title"], data["questions"], data["answers"], user_id)
+    eid, code = add_exam(data["title"], data["questions"], data["answers"], user_id, data["time_limit"])
     new_user = get_user(user_id)
+    time_text = f"{data['time_limit']} ثانية لكل سؤال" if data["time_limit"] > 0 else "بدون وقت محدد"
     
-    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_user['points']:.2f}", user_id, call.message.message_id)
+    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n⏰ وقت الإجابة: {time_text}\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_user['points']:.2f}", user_id, call.message.message_id)
 
 # ========== 5. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
@@ -613,10 +659,11 @@ def admin_all_exams(call):
         bot.send_message(OWNER_ID, "لا توجد اختبارات حتى الآن.")
         return
     txt = "📋 قائمة جميع الاختبارات التي أنشأتها:\n\n"
-    for eid, title, code, created_at in exams:
+    for eid, title, code, created_at, time_limit in exams:
+        time_text = f"{time_limit} ثانية" if time_limit > 0 else "بدون وقت"
         c.execute("SELECT COUNT(*) FROM results WHERE exam_id=?", (eid,))
         participants = c.fetchone()[0]
-        txt += f"• {title}\n   رمز: {code}\n   تاريخ: {created_at[:19]}\n   عدد المشاركين: {participants}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+        txt += f"• {title}\n   رمز: {code}\n   الوقت: {time_text}\n   تاريخ: {created_at[:19]}\n   عدد المشاركين: {participants}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
     bot.send_message(OWNER_ID, txt)
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_points")
