@@ -14,7 +14,6 @@ import io
 from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
-import magic
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -249,7 +248,7 @@ def process_translation(user_id, target_lang, target_name):
     filename = session.get("filename", "user_text.txt")
     status_msg = bot.send_message(user_id, "🔄 جاري تجهيز المعالجة...")
     try:
-        update_progress(user_id, status_msg, "📄 جاري استخراج النص من الملف...", 5, "")
+        update_progress(user_id, status_msg, "📄 جاري استخراج النص...", 5, "")
         time.sleep(1)
         
         update_progress(user_id, status_msg, "✂️ جاري تقسيم النص إلى أقسام...", 10, "")
@@ -370,7 +369,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
 
-# ========== 6. معالجة الملفات والنصوص ==========
+# ========== 6. معالجة الملفات والنصوص (المعدلة لحل مشكلة الملفات) ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
@@ -379,7 +378,7 @@ def handle_doc(message):
         return
     
     file_name = message.document.file_name
-    # التحقق من الامتداد
+    # قبول .txt و .TXT فقط
     if not file_name.lower().endswith('.txt'):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط")
         return
@@ -390,12 +389,12 @@ def handle_doc(message):
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
         
-        # محاولة فك الترميز
+        # محاولة فك الترميز بعدة طرق
         text = None
-        for encoding in ['utf-8', 'cp1256', 'iso-8859-6', 'latin-1']:
+        for encoding in ['utf-8', 'cp1256', 'iso-8859-6', 'windows-1256', 'latin-1']:
             try:
                 text = downloaded.decode(encoding)
-                print(f"Decoded with {encoding}")
+                print(f"✅ Decoded with {encoding}")
                 break
             except:
                 continue
@@ -404,7 +403,8 @@ def handle_doc(message):
             bot.edit_message_text("❌ لا يمكن قراءة الملف. تأكد من أنه نصي وبترميز UTF-8.", user_id, status_msg.message_id)
             return
         
-        if len(text.strip()) < 5:
+        text = text.strip()
+        if len(text) < 5:
             bot.edit_message_text("❌ الملف فارغ أو النص قصير جداً.", user_id, status_msg.message_id)
             return
         
