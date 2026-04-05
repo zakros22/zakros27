@@ -7,12 +7,9 @@ from deep_translator import GoogleTranslator
 import time
 import re
 import requests
-from PIL import Image, ImageDraw, ImageFont
 import arabic_reshaper
 from bidi.algorithm import get_display
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.utils import ImageReader
+from fpdf import FPDF
 import sqlite3
 from datetime import datetime
 
@@ -23,7 +20,7 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== قاعدة البيانات ==========
+# ========== 1. قاعدة البيانات (نقاط، إحالات، مشاركات) ==========
 DB_NAME = "bot_data.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -49,21 +46,18 @@ def get_user(user_id):
     c = conn.cursor()
     c.execute("SELECT points, total_shares, extra_points FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
-    conn.close()
-    if row:
-        return {"points": row[0], "total_shares": row[1], "extra_points": row[2]}
-    else:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
+    if not row:
         c.execute("INSERT INTO users (user_id, points, total_shares, extra_points) VALUES (?,?,?,?)", (user_id, 2, 0, 0))
         conn.commit()
         conn.close()
         return {"points": 2, "total_shares": 0, "extra_points": 0}
+    conn.close()
+    return {"points": row[0], "total_shares": row[1], "extra_points": row[2]}
 
-def update_points(user_id, points_delta):
+def update_points(user_id, delta):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("UPDATE users SET points = points + ? WHERE user_id=?", (points_delta, user_id))
+    c.execute("UPDATE users SET points = points + ? WHERE user_id=?", (delta, user_id))
     conn.commit()
     conn.close()
 
@@ -86,48 +80,96 @@ def add_referral(referrer_id, referred_id):
     conn.commit()
     conn.close()
 
-# ========== تحميل خط عربي ==========
-FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
-FONT_PATH = "NotoSansArabic-Regular.ttf"
+# ========== 2. تحميل خط عالمي (يدعم العربية واللاتينية) ==========
+FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+FONT_PATH = "DejaVuSans.ttf"
 if not os.path.exists(FONT_PATH):
     try:
+        print("Downloading DejaVu font...")
         r = requests.get(FONT_URL, timeout=30)
         with open(FONT_PATH, "wb") as f:
             f.write(r.content)
+        print("Font downloaded.")
     except:
+        print("Font download failed, using built-in.")
         FONT_PATH = None
 
-def reshape_text(text):
+def reshape_arabic(text):
+    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
     if any('\u0600' <= c <= '\u06FF' for c in text):
-        reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
+        return get_display(arabic_reshaper.reshape(text))
     return text
 
-def text_to_image(text, output_path, width=500):
-    if not FONT_PATH:
-        raise Exception("Font not available")
-    font = ImageFont.truetype(FONT_PATH, 20)
-    dummy = Image.new('RGB', (1,1))
-    draw = ImageDraw.Draw(dummy)
-    bbox = draw.textbbox((0,0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    img_width = min(width, text_width + 20)
-    img_height = text_height + 20
-    img = Image.new('RGB', (img_width, img_height), color=(255,255,255))
-    draw = ImageDraw.Draw(img)
-    draw.text((10, 10), text, font=font, fill=(0,0,0))
-    img.save(output_path)
-    return output_path
+class BilingualPDF(FPDF):
+    def header(self):
+        if self.page_no() > 1:
+            self.set_font('DejaVu', '', 8)
+            self.set_text_color(100,100,100)
+            self.cell(0, 10, f"الصفحة {self.page_no()}", 0, 0, 'C')
+            self.ln(5)
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('DejaVu', '', 8)
+        self.set_text_color(150,150,150)
+        self.cell(0, 10, "تمت الترجمة بواسطة @zakros_onlinebot", 0, 0, 'C')
 
-# ========== الترجمة ==========
+def create_bilingual_pdf(original_text, translated_text, output_path):
+    pdf = BilingualPDF()
+    pdf.add_page()
+    if FONT_PATH and os.path.exists(FONT_PATH):
+        pdf.add_font('DejaVu', '', FONT_PATH, uni=True)
+        pdf.set_font('DejaVu', '', 12)
+    else:
+        pdf.set_font('Helvetica', '', 12)
+    # تقسيم النصوص إلى فقرات قصيرة (كل فقرة لا تتجاوز 500 حرف)
+    def split_paragraphs(text, max_len=500):
+        paras = []
+        for sentence in text.split('. '):
+            if not paras:
+                paras.append(sentence)
+            elif len(paras[-1]) + len(sentence) + 2 <= max_len:
+                paras[-1] += ". " + sentence
+            else:
+                paras.append(sentence)
+        return [p + "." for p in paras if p]
+    orig_paras = split_paragraphs(original_text)
+    trans_paras = split_paragraphs(translated_text)
+    # جعل عدد الفقرات متساوياً
+    max_paras = max(len(orig_paras), len(trans_paras))
+    orig_paras += [""] * (max_paras - len(orig_paras))
+    trans_paras += [""] * (max_paras - len(trans_paras))
+    for i, (orig, trans) in enumerate(zip(orig_paras, trans_paras)):
+        # النص الأصلي (أزرق)
+        pdf.set_text_color(0, 0, 150)
+        pdf.cell(0, 10, f"النص الأصلي - جزء {i+1}", ln=1)
+        pdf.set_text_color(0, 0, 0)
+        orig_display = reshape_arabic(orig)
+        pdf.multi_cell(0, 8, orig_display)
+        pdf.ln(4)
+        # النص المترجم (أخضر)
+        pdf.set_text_color(0, 100, 0)
+        pdf.cell(0, 10, f"النص المترجم - جزء {i+1}", ln=1)
+        pdf.set_text_color(0, 0, 0)
+        trans_display = reshape_arabic(trans)
+        pdf.multi_cell(0, 8, trans_display)
+        pdf.ln(8)
+        # فاصل بين الفقرات
+        pdf.set_draw_color(200,200,200)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(4)
+        # صفحة جديدة إذا لزم الأمر
+        if pdf.get_y() > 250:
+            pdf.add_page()
+    pdf.output(output_path)
+
+# ========== 3. الترجمة (بدون حدود) ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
     "fr": "Français",
-    "tr": "Türkçe"
+    "tr": "Türkçe",
+    "fa": "فارسی"
 }
-
 user_sessions = {}
 
 def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
@@ -144,62 +186,18 @@ def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
             current = sent + " "
     if current:
         chunks.append(current.strip())
-    translated = []
+    translated_parts = []
     total = len(chunks)
     for i, chunk in enumerate(chunks):
         try:
-            translated.append(translator.translate(chunk))
+            translated_parts.append(translator.translate(chunk))
             if (i+1) % 5 == 0 or i+1 == total:
                 if user_id:
                     bot.send_message(user_id, f"ترجمة: {i+1}/{total} جزء")
-        except:
-            translated.append(f"[خطأ في الجزء {i+1}]")
+        except Exception as e:
+            translated_parts.append(f"[خطأ في الجزء {i+1}]")
         time.sleep(0.3)
-    return " ".join(translated)
-
-def create_bilingual_pdf(original, translated, output_path):
-    c = canvas.Canvas(output_path, pagesize=A4)
-    width, height = A4
-    y = height - 50
-    # تقسيم النصوص إلى فقرات قصيرة
-    def split_into_paragraphs(text, max_len=400):
-        paras = []
-        for sentence in text.split('. '):
-            if not paras:
-                paras.append(sentence)
-            elif len(paras[-1]) + len(sentence) + 2 <= max_len:
-                paras[-1] += ". " + sentence
-            else:
-                paras.append(sentence)
-        return [p + "." for p in paras if p]
-    original_paras = split_into_paragraphs(original)
-    translated_paras = split_into_paragraphs(translated)
-    max_paras = max(len(original_paras), len(translated_paras))
-    # ملء الفقرات الناقصة
-    original_paras += [""] * (max_paras - len(original_paras))
-    translated_paras += [""] * (max_paras - len(translated_paras))
-    for orig, trans in zip(original_paras, translated_paras):
-        # النص الأصلي
-        orig_display = reshape_text(orig)
-        img_orig = tempfile.mktemp(suffix='.png')
-        text_to_image(orig_display, img_orig)
-        c.drawImage(ImageReader(img_orig), 50, y-80, width=500, height=70, preserveAspectRatio=True)
-        y -= 90
-        # النص المترجم
-        trans_display = reshape_text(trans)
-        img_trans = tempfile.mktemp(suffix='.png')
-        text_to_image(trans_display, img_trans)
-        c.drawImage(ImageReader(img_trans), 50, y-80, width=500, height=70, preserveAspectRatio=True)
-        y -= 110
-        os.unlink(img_orig)
-        os.unlink(img_trans)
-        if y < 100:
-            c.showPage()
-            y = height - 50
-    c.setFont("Helvetica", 8)
-    c.setFillColorRGB(0.5,0.5,0.5)
-    c.drawString(50, 30, "تمت الترجمة بواسطة @zakros_onlinebot")
-    c.save()
+    return " ".join(translated_parts)
 
 def process_translation(user_id, target_lang, target_name):
     session = user_sessions.get(user_id)
@@ -209,11 +207,11 @@ def process_translation(user_id, target_lang, target_name):
     # استهلاك نقطة
     user = get_user(user_id)
     if user["points"] <= 0:
-        bot.send_message(user_id, "ليس لديك نقاط كافية. يمكنك الحصول على نقاط إضافية عبر مشاركة البوت (كل 4 مشاركات تمنحك نقطة) أو انتظر إضافة من الأدمن.")
+        bot.send_message(user_id, "ليس لديك نقاط كافية. يمكنك الحصول على نقاط عبر مشاركة البوت (/share) أو الإحالات.")
         return
     update_points(user_id, -1)
     original_text = session["text"]
-    original_filename = session.get("filename", "text_input.txt")
+    original_filename = session.get("filename", "user_text.txt")
     try:
         translated = translate_long_text(original_text, target_lang, user_id=user_id)
         pdf_path = tempfile.mktemp(suffix='.pdf')
@@ -228,53 +226,59 @@ def process_translation(user_id, target_lang, target_name):
         if user_id in user_sessions:
             del user_sessions[user_id]
 
-# ========== أوامر البوت ==========
+# ========== 4. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
-def start(message):
+def start_cmd(message):
     user_id = message.chat.id
-    get_user(user_id)  # إنشاء المستخدم إذا لم يكن موجوداً
-    # معالجة الإحالة إذا وجدت
+    get_user(user_id)
+    # معالجة الإحالة
     if len(message.text.split()) > 1:
         ref = message.text.split()[1]
         if ref.isdigit() and int(ref) != user_id:
             add_referral(int(ref), user_id)
-            bot.send_message(user_id, "تم تفعيل الإحالة! حصل الداعم على نقطة إضافية.")
+            bot.send_message(user_id, "✅ تم تفعيل الإحالة! حصل الداعم على نقطة.")
+    user = get_user(user_id)
     bot.send_message(user_id,
-        "🌍 *بوت الترجمة الذكي*\n\n"
-        "• أرسل ملف .txt أو نصاً مباشرة لأترجمه لك.\n"
-        "• كل مستخدم لديه 2 محاولات مجانية.\n"
-        "• يمكنك الحصول على نقاط إضافية عبر:\n"
-        "   - مشاركة البوت مع أصدقائك (كل 4 مشاركات = نقطة)\n"
-        "   - إحالة مستخدم جديد عبر رابطك الخاص\n"
-        f"رابط إحالتك: https://t.me/{bot.get_me().username}?start={user_id}\n\n"
-        "📌 حقوق البوت: @zakros_onlinebot",
+        f"🌍 *بوت الترجمة الذكي*\n\n"
+        f"• أرسل ملف .txt أو نصاً مباشرة لأترجمه لك.\n"
+        f"• رصيدك الحالي: {user['points']} نقطة\n"
+        f"• كل ترجمة تستهلك نقطة واحدة.\n"
+        f"• يمكنك الحصول على نقاط إضافية عبر:\n"
+        f"   - مشاركة البوت: أرسل /share\n"
+        f"   - إحالة أصدقاء عبر رابطك:\n"
+        f"     https://t.me/{bot.get_me().username}?start={user_id}\n"
+        f"📌 حقوق البوت: @zakros_onlinebot",
         parse_mode="Markdown"
     )
-    # عرض الإحصائيات
-    user = get_user(user_id)
-    bot.send_message(user_id, f"⭐ رصيدك: {user['points']} نقطة\n📊 مشاركاتك: {user['total_shares']}")
 
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
+@bot.message_handler(commands=['share'])
+def share_cmd(message):
+    user_id = message.chat.id
+    add_share(user_id)
+    user = get_user(user_id)
+    bot.send_message(user_id, f"شكراً لمشاركة البوت! تم إضافة مشاركة. رصيدك الآن: {user['points']} نقطة.")
+
+# ========== 5. لوحة تحكم المالك ==========
+@bot.message_handler(commands=['admin', 'owner'])
+def admin_cmd(message):
     if message.chat.id != OWNER_ID:
         bot.reply_to(message, "غير مصرح.")
         return
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("➕ إضافة نقاط لمستخدم", callback_data="admin_add_points"))
-    markup.add(InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats"))
+    markup.add(InlineKeyboardButton("➕ إضافة نقاط", callback_data="admin_add_points"))
+    markup.add(InlineKeyboardButton("📊 إحصائيات", callback_data="admin_stats"))
     markup.add(InlineKeyboardButton("👥 قائمة المستخدمين", callback_data="admin_users"))
-    bot.send_message(OWNER_ID, "🔧 لوحة التحكم:", reply_markup=markup)
+    bot.send_message(OWNER_ID, "🔧 لوحة تحكم المالك:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
 def admin_callback(call):
     if call.message.chat.id != OWNER_ID:
         bot.answer_callback_query(call.id, "غير مصرح", True)
         return
-    data = call.data
-    if data == "admin_add_points":
-        msg = bot.send_message(OWNER_ID, "أرسل معرف المستخدم وعدد النقاط مفصولين بمسافة (مثال: 123456789 5):")
+    if call.data == "admin_add_points":
+        msg = bot.send_message(OWNER_ID, "أرسل معرف المستخدم وعدد النقاط (مثال: 123456789 5):")
         bot.register_next_step_handler(msg, add_points_step)
-    elif data == "admin_stats":
+    elif call.data == "admin_stats":
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM users")
@@ -284,8 +288,8 @@ def admin_callback(call):
         c.execute("SELECT SUM(total_shares) FROM users")
         total_shares = c.fetchone()[0] or 0
         conn.close()
-        bot.send_message(OWNER_ID, f"📊 إحصائيات البوت:\n👥 عدد المستخدمين: {total_users}\n⭐ مجموع النقاط: {total_points}\n📤 إجمالي المشاركات: {total_shares}")
-    elif data == "admin_users":
+        bot.send_message(OWNER_ID, f"📊 إحصائيات:\n👥 مستخدمين: {total_users}\n⭐ نقاط: {total_points}\n📤 مشاركات: {total_shares}")
+    elif call.data == "admin_users":
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute("SELECT user_id, points, total_shares FROM users ORDER BY points DESC LIMIT 20")
@@ -301,18 +305,21 @@ def admin_callback(call):
 
 def add_points_step(message):
     try:
-        uid, pts = map(int, message.text.split())
+        parts = message.text.split()
+        uid = int(parts[0])
+        pts = int(parts[1])
         update_points(uid, pts)
         bot.send_message(OWNER_ID, f"✅ تم إضافة {pts} نقطة للمستخدم {uid}")
     except:
-        bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة.")
+        bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: `معرف_المستخدم عدد_النقاط`")
 
+# ========== 6. معالجة الملفات والنصوص ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
     user = get_user(user_id)
     if user["points"] <= 0:
-        bot.reply_to(message, "❌ رصيدك لا يكفي. شارك البوت لتحصل على نقاط مجانية.")
+        bot.reply_to(message, "❌ رصيدك لا يكفي. شارك البوت (/share) لتحصل على نقاط مجانية.")
         return
     if not message.document.file_name.endswith('.txt'):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط.")
@@ -332,12 +339,12 @@ def handle_doc(message):
     except Exception as e:
         bot.reply_to(message, f"❌ خطأ: {str(e)[:100]}")
 
-@bot.message_handler(func=lambda m: m.text and not m.text.startswith('/') and not m.text.startswith('admin'))
+@bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
 def handle_text(message):
     user_id = message.chat.id
     user = get_user(user_id)
     if user["points"] <= 0:
-        bot.reply_to(message, "❌ رصيدك لا يكفي. شارك البوت لتحصل على نقاط مجانية.")
+        bot.reply_to(message, "❌ رصيدك لا يكفي. شارك البوت (/share) لتحصل على نقاط مجانية.")
         return
     text = message.text.strip()
     if len(text) < 5:
@@ -363,13 +370,6 @@ def translate_callback(call):
     thread = threading.Thread(target=process_translation, args=(user_id, target_lang, target_name))
     thread.daemon = True
     thread.start()
-
-# معالجة المشاركة (عند مشاركة المستخدم للبوت، يتم استدعاء الأمر /share)
-@bot.message_handler(commands=['share'])
-def share_command(message):
-    user_id = message.chat.id
-    add_share(user_id)
-    bot.send_message(user_id, "شكراً لمشاركة البوت! تم إضافة مشاركة. كل 4 مشاركات تمنحك نقطة إضافية.")
 
 if __name__ == "__main__":
     print("✅ البوت يعمل...")
