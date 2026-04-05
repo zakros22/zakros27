@@ -9,14 +9,8 @@ import re
 import requests
 import sqlite3
 from datetime import datetime
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.utils import ImageReader
-from PIL import Image, ImageDraw, ImageFont
-import arabic_reshaper
-from bidi.algorithm import get_display
+from xhtml2pdf import pisa
+from bs4 import BeautifulSoup
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -25,7 +19,7 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. قاعدة البيانات ==========
+# ========== قاعدة البيانات ==========
 DB_NAME = "bot_data.db"
 
 def init_db():
@@ -85,115 +79,150 @@ def add_referral(referrer_id, referred_id):
     conn.commit()
     conn.close()
 
-# ========== 2. تحميل الخط العربي ==========
-FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
-FONT_PATH = "NotoSansArabic-Regular.ttf"
-if not os.path.exists(FONT_PATH):
-    try:
-        print("Downloading Arabic font...")
-        r = requests.get(FONT_URL, timeout=30)
-        with open(FONT_PATH, "wb") as f:
-            f.write(r.content)
-        print("Font downloaded.")
-    except:
-        print("Font download failed.")
-        FONT_PATH = None
+# ========== إنشاء PDF احترافي ==========
+def create_html_for_pdf(original, translated, page_num):
+    """إنشاء HTML للتنسيق الجميل للـ PDF"""
+    return f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            @page {{
+                size: A4;
+                margin: 2cm;
+                @frame footer {{
+                    -pdf-frame-content: footerContent;
+                    bottom: 0cm;
+                    margin-left: 2cm;
+                    margin-right: 2cm;
+                    height: 1cm;
+                }}
+            }}
+            body {{
+                font-family: "DejaVu Sans", "Arial", sans-serif;
+                line-height: 1.6;
+                direction: ltr;
+            }}
+            .header {{
+                text-align: center;
+                margin-bottom: 30px;
+                border-bottom: 2px solid #3498db;
+                padding-bottom: 10px;
+            }}
+            .section {{
+                margin-bottom: 30px;
+                page-break-inside: avoid;
+            }}
+            .section-title {{
+                background-color: #3498db;
+                color: white;
+                padding: 8px 15px;
+                border-radius: 5px;
+                margin-bottom: 15px;
+                font-size: 16px;
+                font-weight: bold;
+            }}
+            .original-text {{
+                background-color: #f8f9fa;
+                padding: 15px;
+                border-radius: 8px;
+                border-left: 4px solid #3498db;
+                margin-bottom: 20px;
+            }}
+            .translated-text {{
+                background-color: #f0fdf4;
+                padding: 15px;
+                border-radius: 8px;
+                border-left: 4px solid #22c55e;
+                margin-bottom: 20px;
+            }}
+            .content {{
+                font-size: 12px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }}
+            .separator {{
+                height: 1px;
+                background-color: #e5e7eb;
+                margin: 20px 0;
+            }}
+            .footer {{
+                text-align: center;
+                font-size: 9px;
+                color: #6c757d;
+                margin-top: 30px;
+                padding-top: 10px;
+                border-top: 1px solid #dee2e6;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h2>📄 ترجمة المستند</h2>
+            <p>Document Translation</p>
+        </div>
+        
+        <div class="section">
+            <div class="section-title">📖 النص الأصلي / Original Text</div>
+            <div class="original-text">
+                <div class="content">{original.replace(chr(10), '<br>')}</div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="section-title">🌍 النص المترجم / Translated Text</div>
+            <div class="translated-text">
+                <div class="content">{translated.replace(chr(10), '<br>')}</div>
+            </div>
+        </div>
+        
+        <div id="footerContent" class="footer">
+            الصفحة {page_num} | تمت الترجمة بواسطة @zakros_onlinebot
+        </div>
+    </body>
+    </html>
+    '''
 
-# تسجيل الخط في reportlab
-if FONT_PATH and os.path.exists(FONT_PATH):
-    try:
-        pdfmetrics.registerFont(TTFont('ArabicFont', FONT_PATH))
-        ARABIC_FONT = 'ArabicFont'
-    except:
-        ARABIC_FONT = 'Helvetica'
-else:
-    ARABIC_FONT = 'Helvetica'
-
-def reshape_arabic(text):
-    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
-    if any('\u0600' <= c <= '\u06FF' for c in text):
-        reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
-    return text
-
-def create_bilingual_pdf(original, translated, output_path):
-    """إنشاء PDF مع دعم كامل للغة العربية"""
-    c = canvas.Canvas(output_path, pagesize=A4)
-    width, height = A4
-    y = height - 50
-    page_num = 1
-    
-    # تقسيم النصوص إلى فقرات
-    def split_paragraphs(text, max_len=500):
-        paras = []
-        for sent in text.split('. '):
-            if not paras:
-                paras.append(sent)
-            elif len(paras[-1]) + len(sent) + 2 <= max_len:
-                paras[-1] += ". " + sent
+def create_pdf(original, translated, output_path):
+    """إنشاء PDF باستخدام xhtml2pdf"""
+    # تقسيم النص إلى أجزاء إذا كان طويلاً جداً
+    def split_text(text, limit=5000):
+        if len(text) <= limit:
+            return [text]
+        parts = []
+        sentences = text.split('. ')
+        current = ""
+        for sent in sentences:
+            if len(current) + len(sent) + 2 <= limit:
+                current += sent + ". "
             else:
-                paras.append(sent)
-        return [p + "." for p in paras if p]
+                parts.append(current)
+                current = sent + ". "
+        if current:
+            parts.append(current)
+        return parts
     
-    orig_paras = split_paragraphs(original)
-    trans_paras = split_paragraphs(translated)
-    max_paras = max(len(orig_paras), len(trans_paras))
-    orig_paras += [""] * (max_paras - len(orig_paras))
-    trans_paras += [""] * (max_paras - len(trans_paras))
+    original_parts = split_text(original)
+    translated_parts = split_text(translated)
+    max_parts = max(len(original_parts), len(translated_parts))
     
-    for i, (orig, trans) in enumerate(zip(orig_paras, trans_paras)):
-        # النص الأصلي
-        c.setFont(ARABIC_FONT, 12)
-        c.setFillColorRGB(0, 0, 0.6)
-        c.drawString(50, y, f"Original Text - Part {i+1}")
-        y -= 20
-        c.setFillColorRGB(0, 0, 0)
-        orig_display = reshape_arabic(orig)
-        if orig_display:
-            text_obj = c.beginText(50, y)
-            text_obj.setFont(ARABIC_FONT, 11)
-            for line in orig_display.split('\n'):
-                text_obj.textLine(line[:100])
-            c.drawText(text_obj)
-            y -= len(orig_display.split('\n')) * 15 + 10
-        
-        # النص المترجم
-        if y < 100:
-            c.showPage()
-            y = height - 50
-            page_num += 1
-            c.setFont(ARABIC_FONT, 12)
-        
-        c.setFillColorRGB(0, 0.5, 0)
-        c.drawString(50, y, f"Translated Text - Part {i+1}")
-        y -= 20
-        c.setFillColorRGB(0, 0, 0)
-        trans_display = reshape_arabic(trans)
-        if trans_display:
-            text_obj = c.beginText(50, y)
-            text_obj.setFont(ARABIC_FONT, 11)
-            for line in trans_display.split('\n'):
-                text_obj.textLine(line[:100])
-            c.drawText(text_obj)
-            y -= len(trans_display.split('\n')) * 15 + 20
-        
-        # فاصل بين الفقرات
-        if y < 100:
-            c.showPage()
-            y = height - 50
-            page_num += 1
-        else:
-            c.setStrokeColorRGB(0.8, 0.8, 0.8)
-            c.line(50, y, 550, y)
-            y -= 15
+    # توسيع القوائم لتكون متساوية الطول
+    while len(original_parts) < max_parts:
+        original_parts.append("...")
+    while len(translated_parts) < max_parts:
+        translated_parts.append("...")
     
-    # تذييل الصفحة
-    c.setFont(ARABIC_FONT, 8)
-    c.setFillColorRGB(0.5, 0.5, 0.5)
-    c.drawString(50, 30, f"Page {page_num} - Translation by @zakros_onlinebot")
-    c.save()
+    # إنشاء PDF لكل جزء ودمجها
+    with open(output_path, 'wb') as pdf_file:
+        for i, (orig_part, trans_part) in enumerate(zip(original_parts, translated_parts), 1):
+            html = create_html_for_pdf(orig_part, trans_part, i)
+            pisa_status = pisa.CreatePDF(html, dest=pdf_file)
+            if pisa_status.err:
+                raise Exception("PDF generation failed")
+    return output_path
 
-# ========== 3. الترجمة ==========
+# ========== الترجمة ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -245,7 +274,7 @@ def process_translation(user_id, target_lang, target_name):
     try:
         translated = translate_long_text(text, target_lang, user_id=user_id)
         pdf_path = tempfile.mktemp(suffix='.pdf')
-        create_bilingual_pdf(text, translated, pdf_path)
+        create_pdf(text, translated, pdf_path)
         with open(pdf_path, 'rb') as f:
             bot.send_document(user_id, f, caption=f"✅ Translation to {target_name} completed.\n@zakros_onlinebot", visible_file_name=f"{filename}_{target_lang}.pdf")
         os.unlink(pdf_path)
@@ -256,7 +285,7 @@ def process_translation(user_id, target_lang, target_name):
         if user_id in user_sessions:
             del user_sessions[user_id]
 
-# ========== 4. أوامر البوت ==========
+# ========== أوامر البوت ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
@@ -338,7 +367,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ Invalid format. Send: user_id points")
 
-# ========== 5. معالجة الملفات والنصوص ==========
+# ========== معالجة الملفات والنصوص ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
