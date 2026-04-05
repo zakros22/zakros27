@@ -19,7 +19,6 @@ OWNER_ID = 7021542402
 # ========== 1. قاعدة البيانات ==========
 conn = sqlite3.connect("exam.db", check_same_thread=False)
 c = conn.cursor()
-# الاختبارات
 c.execute('''CREATE TABLE IF NOT EXISTS exams (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT,
@@ -28,14 +27,12 @@ c.execute('''CREATE TABLE IF NOT EXISTS exams (
     link_code TEXT UNIQUE,
     created_by INTEGER
 )''')
-# الطلاب
 c.execute('''CREATE TABLE IF NOT EXISTS students (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
     points INTEGER DEFAULT 2,
     total_shares INTEGER DEFAULT 0
 )''')
-# نتائج الطلاب
 c.execute('''CREATE TABLE IF NOT EXISTS results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     exam_id INTEGER,
@@ -45,7 +42,6 @@ c.execute('''CREATE TABLE IF NOT EXISTS results (
     percentage REAL,
     date TEXT
 )''')
-# إحالات
 c.execute('''CREATE TABLE IF NOT EXISTS referrals (
     referrer_id INTEGER,
     referred_id INTEGER,
@@ -111,7 +107,6 @@ def add_referral(referrer_id, referred_id):
 def start(message):
     user_id = message.chat.id
     student = get_student(user_id)
-    # معالجة الإحالة
     if len(message.text.split()) > 1:
         ref = message.text.split()[1]
         if ref.isdigit() and int(ref) != user_id:
@@ -126,19 +121,19 @@ def start(message):
         markup.add(InlineKeyboardButton("➕ إنشاء اختبار", callback_data="create_exam"))
     
     bot.send_message(user_id,
-        f"🎓 *بوت الاختبارات*\n\n"
+        f"🎓 بوت الاختبارات\n\n"
         f"• رصيدك: {student['points']} نقطة\n"
         f"• كل اختبار يستهلك نقطة.\n"
         f"• احصل على نقاط مجانية عبر مشاركة الرابط (كل 4 مشاركات = نقطة).\n"
-        f"رابط إحالتك:\n`https://t.me/{bot.get_me().username}?start={user_id}`\n\n"
+        f"رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\n"
         f"📌 @zakros_onlinebot",
-        parse_mode="Markdown", reply_markup=markup)
+        reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "share_link")
 def share_link(call):
     user_id = call.message.chat.id
     bot.answer_callback_query(call.id)
-    bot.send_message(user_id, f"🎁 رابط إحالتك:\n`https://t.me/{bot.get_me().username}?start={user_id}`\n\nكل 4 مشاركات = نقطة إضافية.", parse_mode="Markdown")
+    bot.send_message(user_id, f"🎁 رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\nكل 4 مشاركات = نقطة إضافية.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
 def enter_exam(call):
@@ -173,7 +168,6 @@ def start_exam(user_id, exam):
     }
     send_question(user_id)
 
-# تخزين مؤقت للإجابات
 user_answers = {}
 
 def send_question(user_id):
@@ -190,13 +184,13 @@ def send_question(user_id):
         markup = InlineKeyboardMarkup()
         for opt in q["options"]:
             markup.add(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
-        bot.send_message(user_id, f"📝 *السؤال {idx+1}:*\n{q['text']}", parse_mode="Markdown", reply_markup=markup)
+        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
     elif q["type"] == "truefalse":
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ صح", callback_data="ans_صح"), InlineKeyboardButton("❌ خطأ", callback_data="ans_خطأ"))
-        bot.send_message(user_id, f"📝 *السؤال {idx+1}:*\n{q['text']}", parse_mode="Markdown", reply_markup=markup)
+        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
     else:
-        msg = bot.send_message(user_id, f"📝 *السؤال {idx+1}:*\n{q['text']}\n\nأجب كتابياً:", parse_mode="Markdown")
+        msg = bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}\n\nأجب كتابياً:")
         bot.register_next_step_handler(msg, process_essay, user_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ans_"))
@@ -238,7 +232,6 @@ def finish_exam(user_id):
     percentage = (score / total) * 100
     save_result(data["exam_id"], user_id, score, total, percentage)
     
-    # شهادة PDF
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 20)
@@ -255,12 +248,12 @@ def finish_exam(user_id):
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
     
-    bot.send_message(user_id, f"🎉 *انتهى الاختبار!*\nنتيجتك: {score}/{total} ({percentage:.1f}%)", parse_mode="Markdown")
+    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nنتيجتك: {score}/{total} ({percentage:.1f}%)")
     with open(path, 'rb') as f:
         bot.send_document(user_id, f, caption="📜 شهادتك", visible_file_name="certificate.pdf")
     os.unlink(path)
 
-# ========== 3. إنشاء اختبار (للمالك فقط) ==========
+# ========== 3. إنشاء اختبار ==========
 temp_exam = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_exam")
@@ -353,7 +346,7 @@ def finish_creation(call):
         return
     data = temp_exam.pop(OWNER_ID)
     eid, code = add_exam(data["title"], data["questions"], data["answers"], OWNER_ID)
-    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\n`https://t.me/{bot.get_me().username}?start=exam_{code}`\n\nرمز الاختبار: `{code}`\nعدد الأسئلة: {len(data['questions'])}", OWNER_ID, call.message.message_id, parse_mode="Markdown")
+    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}", OWNER_ID, call.message.message_id)
 
 # ========== 4. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
@@ -367,7 +360,7 @@ def admin_panel(call):
     markup.add(InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats"))
     markup.add(InlineKeyboardButton("📋 قائمة الاختبارات", callback_data="admin_exams"))
     markup.add(InlineKeyboardButton("📈 نتائج اختبار", callback_data="admin_results"))
-    bot.send_message(OWNER_ID, "🔧 *لوحة تحكم المالك*", parse_mode="Markdown", reply_markup=markup)
+    bot.send_message(OWNER_ID, "🔧 لوحة تحكم المالك", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_points")
 def admin_add_points(call):
@@ -415,7 +408,7 @@ def admin_stats(call):
     results = c.fetchone()[0]
     c.execute("SELECT SUM(points) FROM students")
     total_points = c.fetchone()[0] or 0
-    bot.send_message(OWNER_ID, f"📊 *إحصائيات البوت*\n👥 الطلاب: {students}\n📚 الاختبارات: {exams}\n📝 المحاولات: {results}\n⭐ مجموع النقاط: {total_points}", parse_mode="Markdown")
+    bot.send_message(OWNER_ID, f"📊 إحصائيات البوت\n👥 الطلاب: {students}\n📚 الاختبارات: {exams}\n📝 المحاولات: {results}\n⭐ مجموع النقاط: {total_points}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_exams")
 def admin_exams(call):
@@ -425,10 +418,10 @@ def admin_exams(call):
     if not exams:
         bot.send_message(OWNER_ID, "لا توجد اختبارات.")
         return
-    txt = "📋 *قائمة الاختبارات*\n"
+    txt = "📋 قائمة الاختبارات\n"
     for eid, title, code in exams:
-        txt += f"• {title}\n   رمز: `{code}`\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
-    bot.send_message(OWNER_ID, txt, parse_mode="Markdown")
+        txt += f"• {title}\n   رمز: {code}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+    bot.send_message(OWNER_ID, txt)
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_results")
 def admin_results(call):
@@ -447,12 +440,12 @@ def show_results(message):
     if not results:
         bot.send_message(OWNER_ID, f"لا توجد نتائج لاختبار {exam['title']}.")
         return
-    txt = f"📈 *نتائج اختبار {exam['title']}*\n\n"
+    txt = f"📈 نتائج اختبار {exam['title']}\n\n"
     for sid, score, total, pct in results:
         txt += f"👤 مستخدم {sid}: {score}/{total} ({pct:.1f}%)\n"
-    bot.send_message(OWNER_ID, txt, parse_mode="Markdown")
+    bot.send_message(OWNER_ID, txt)
 
-# معالجة الروابط المباشرة للاختبارات
+# معالجة الروابط المباشرة
 @bot.message_handler(func=lambda m: m.text and m.text.startswith("https://t.me/") and "start=exam_" in m.text)
 def handle_exam_link(message):
     code = message.text.split("start=exam_")[1].split()[0]
@@ -468,6 +461,6 @@ def handle_exam_link(message):
     start_exam(message.chat.id, exam)
 
 if __name__ == "__main__":
-    print("✅ بوت الاختبارات يعمل...")
+    print("✅ البوت يعمل...")
     bot.remove_webhook()
     bot.infinity_polling()
