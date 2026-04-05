@@ -12,7 +12,6 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# اللغات المدعومة (يمكنك إضافة المزيد)
 LANGUAGES = {
     "ar": "🇸🇦 العربية (فصحى)",
     "en": "🇬🇧 English",
@@ -20,13 +19,10 @@ LANGUAGES = {
     "tr": "🇹🇷 Türkçe"
 }
 
-# تخزين مؤقت لبيانات المستخدمين
 user_data = {}
 
 def translate_text(text, target_lang, chunk_size=1500):
-    """ترجمة النص الطويل بتقسيمه إلى أجزاء"""
     translator = GoogleTranslator(source='auto', target=target_lang)
-    # تقسيم النص إلى جمل
     sentences = text.replace('\n', ' ').split('.')
     chunks = []
     current = ""
@@ -45,7 +41,6 @@ def translate_text(text, target_lang, chunk_size=1500):
     for i, chunk in enumerate(chunks):
         try:
             translated_parts.append(translator.translate(chunk))
-            # إرسال تحديث التقدم كل 5 أجزاء
             if (i + 1) % 5 == 0 or i + 1 == total:
                 bot.send_message(user_data.get("current_user", 0), f"⏳ الترجمة: {i+1}/{total} جزء")
         except Exception as e:
@@ -54,7 +49,6 @@ def translate_text(text, target_lang, chunk_size=1500):
     return " ".join(translated_parts)
 
 def process_translation(user_id, target_lang, target_name):
-    """دالة تعمل في الخلفية لترجمة النص وإرسال النتيجة"""
     session = user_data.get(user_id)
     if not session:
         bot.send_message(user_id, "❌ انتهت الجلسة، أعد إرسال الملف.")
@@ -67,7 +61,6 @@ def process_translation(user_id, target_lang, target_name):
     try:
         translated = translate_text(original_text, target_lang)
 
-        # إنشاء ملف مترجم جديد
         base, ext = os.path.splitext(original_filename)
         new_filename = f"{base}_{target_lang}{ext}"
         new_path = tempfile.mktemp(suffix=ext)
@@ -75,7 +68,6 @@ def process_translation(user_id, target_lang, target_name):
         with open(new_path, 'w', encoding='utf-8') as f:
             f.write(translated)
 
-        # إرسال الملف
         with open(new_path, 'rb') as f:
             bot.send_document(
                 user_id,
@@ -84,7 +76,6 @@ def process_translation(user_id, target_lang, target_name):
                 visible_file_name=new_filename
             )
 
-        # تنظيف
         os.unlink(original_path)
         os.unlink(new_path)
         del user_data[user_id]
@@ -121,12 +112,10 @@ def handle_doc(message):
             bot.reply_to(message, "❌ النص قصير جدًا.")
             return
 
-        # حفظ الملف المؤقت
         with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as tmp:
             tmp.write(downloaded)
             tmp_path = tmp.name
 
-        # حفظ بيانات الجلسة
         user_data[message.chat.id] = {
             "text": text,
             "filename": message.document.file_name,
@@ -134,7 +123,6 @@ def handle_doc(message):
         }
         user_data["current_user"] = message.chat.id
 
-        # عرض أزرار اللغات
         markup = InlineKeyboardMarkup()
         for code, name in LANGUAGES.items():
             markup.add(InlineKeyboardButton(name, callback_data=code))
@@ -157,7 +145,6 @@ def translate_callback(call):
     bot.edit_message_reply_markup(user_id, call.message.message_id, reply_markup=None)
     bot.send_message(user_id, f"⏳ بدء الترجمة إلى {target_name}... سأرسل الملف فور الانتهاء (قد يستغرق عدة دقائق).")
 
-    # تشغيل الترجمة في خيط منفصل
     thread = threading.Thread(target=process_translation, args=(user_id, target_lang, target_name))
     thread.daemon = True
     thread.start()
