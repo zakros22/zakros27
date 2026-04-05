@@ -8,6 +8,7 @@ import string
 import random
 from datetime import datetime
 from fpdf import FPDF
+import difflib
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -25,7 +26,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS exams (
     questions TEXT,
     answers TEXT,
     link_code TEXT UNIQUE,
-    created_by INTEGER
+    created_by INTEGER,
+    created_at TEXT
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS students (
     user_id INTEGER PRIMARY KEY,
@@ -37,9 +39,10 @@ c.execute('''CREATE TABLE IF NOT EXISTS results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     exam_id INTEGER,
     student_id INTEGER,
-    score INTEGER,
-    total INTEGER,
+    score REAL,
+    total REAL,
     percentage REAL,
+    details TEXT,
     date TEXT
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS referrals (
@@ -51,8 +54,8 @@ conn.commit()
 
 def add_exam(title, questions, answers, created_by):
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by) VALUES (?,?,?,?,?)",
-              (title, json.dumps(questions), json.dumps(answers), code, created_by))
+    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at) VALUES (?,?,?,?,?,?)",
+              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat()))
     conn.commit()
     return c.lastrowid, code
 
@@ -63,13 +66,13 @@ def get_exam_by_code(code):
         return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4]}
     return None
 
-def get_exams_by_teacher(teacher_id):
-    c.execute("SELECT id, title, link_code FROM exams WHERE created_by=?", (teacher_id,))
+def get_recent_exams(limit=5):
+    c.execute("SELECT id, title, link_code, created_at FROM exams ORDER BY created_at DESC LIMIT ?", (limit,))
     return c.fetchall()
 
-def save_result(exam_id, student_id, score, total, percentage):
-    c.execute("INSERT INTO results (exam_id, student_id, score, total, percentage, date) VALUES (?,?,?,?,?,?)",
-              (exam_id, student_id, score, total, percentage, datetime.now().isoformat()))
+def save_result(exam_id, student_id, score, total, percentage, details):
+    c.execute("INSERT INTO results (exam_id, student_id, score, total, percentage, details, date) VALUES (?,?,?,?,?,?,?)",
+              (exam_id, student_id, score, total, percentage, json.dumps(details), datetime.now().isoformat()))
     conn.commit()
 
 def get_results_by_exam(exam_id):
@@ -101,6 +104,16 @@ def add_referral(referrer_id, referred_id):
     c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?,?,?)", (referrer_id, referred_id, datetime.now().isoformat()))
     c.execute("UPDATE students SET points = points + 1 WHERE user_id=?", (referrer_id,))
     conn.commit()
+
+def calculate_essay_score(user_answer, correct_answer):
+    """حساب نسبة التطابق بين إجابة الطالب والإجابة النموذجية"""
+    user_clean = user_answer.lower().strip()
+    correct_clean = correct_answer.lower().strip()
+    if user_clean == correct_clean:
+        return 1.0
+    # استخدام نسبة التشابه
+    ratio = difflib.SequenceMatcher(None, user_clean, correct_clean).ratio()
+    return round(ratio, 2)
 
 # ========== 2. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
@@ -181,9 +194,11 @@ def send_question(user_id):
     
     q = data["questions"][idx]
     if q["type"] == "mcq":
-        markup = InlineKeyboardMarkup()
+        markup = InlineKeyboardMarkup(row_width=2)
+        buttons = []
         for opt in q["options"]:
-            markup.add(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
+            buttons.append(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
+        markup.add(*buttons)
         bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
     elif q["type"] == "truefalse":
         markup = InlineKeyboardMarkup()
@@ -221,26 +236,56 @@ def finish_exam(user_id):
     if not data:
         return
     total = len(data["questions"])
-    score = 0
+    score = 0.0
+    details = []
     for i, (q, user_ans, correct) in enumerate(zip(data["questions"], data["user_ans"], data["answers"])):
         if q["type"] == "essay":
-            if user_ans.lower().strip() == correct.lower().strip():
-                score += 1
+            # حساب نسبة مئوية للإجابة المقالية
+            essay_score = calculate_essay_score(user_ans, correct)
+            score += essay_score
+            details.append({
+                "question": q["text"],
+                "user_answer": user_ans,
+                "correct_answer": correct,
+                "score": essay_score,
+                "max_score": 1.0,
+                "percentage": essay_score * 100
+            })
         else:
-            if user_ans == correct:
-                score += 1
-    percentage = (score / total) * 100
-    save_result(data["exam_id"], user_id, score, total, percentage)
+            # أسئلة الاختيار: نقطة كاملة أو صفر
+            is_correct = (user_ans == correct)
+            score += 1 if is_correct else 0
+            details.append({
+                "question": q["text"],
+                "user_answer": user_ans,
+                "correct_answer": correct,
+                "score": 1 if is_correct else 0,
+                "max_score": 1,
+                "percentage": 100 if is_correct else 0
+            })
     
+    percentage = (score / total) * 100
+    save_result(data["exam_id"], user_id, score, total, percentage, details)
+    
+    # إنشاء شهادة PDF مفصلة
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 20)
-    pdf.cell(0, 20, "Certificate", 0, 1, 'C')
+    pdf.cell(0, 20, "Certificate of Completion", 0, 1, 'C')
     pdf.set_font("Helvetica", "", 12)
     pdf.cell(0, 10, f"Student ID: {user_id}", 0, 1, 'C')
     pdf.cell(0, 10, f"Exam: {data['title']}", 0, 1, 'C')
-    pdf.cell(0, 10, f"Score: {score}/{total} ({percentage:.1f}%)", 0, 1, 'C')
-    pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", 0, 1, 'C')
+    pdf.cell(0, 10, f"Total Score: {score:.1f}/{total} ({percentage:.1f}%)", 0, 1, 'C')
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 10, "Detailed Results:", 0, 1, 'L')
+    pdf.set_font("Helvetica", "", 10)
+    for i, d in enumerate(details):
+        pdf.multi_cell(0, 6, f"Q{i+1}: {d['question'][:60]}")
+        pdf.cell(0, 6, f"   Your answer: {d['user_answer'][:50]}", 0, 1, 'L')
+        pdf.cell(0, 6, f"   Correct answer: {d['correct_answer'][:50]}", 0, 1, 'L')
+        pdf.cell(0, 6, f"   Score: {d['score']}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
+        pdf.ln(3)
     pdf.set_y(-30)
     pdf.set_font_size(8)
     pdf.cell(0, 10, "@zakros_onlinebot", 0, 0, 'C')
@@ -248,7 +293,7 @@ def finish_exam(user_id):
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
     
-    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nنتيجتك: {score}/{total} ({percentage:.1f}%)")
+    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nنتيجتك: {score:.1f}/{total} ({percentage:.1f}%)")
     with open(path, 'rb') as f:
         bot.send_document(user_id, f, caption="📜 شهادتك", visible_file_name="certificate.pdf")
     os.unlink(path)
@@ -284,7 +329,7 @@ def process_question(message):
     temp_exam[OWNER_ID]["current_q"] = {"text": q_text, "type": q_type}
     if q_type == "mcq":
         temp_exam[OWNER_ID]["step"] = "mcq_options"
-        bot.send_message(OWNER_ID, "📋 أرسل الخيارات مفصولة بفواصل (مثال: باريس, لندن, برلين):")
+        bot.send_message(OWNER_ID, "📋 أرسل الخيارات مفصولة بفواصل (مثال: باريس, لندن, برلين, مدريد):")
     elif q_type == "truefalse":
         temp_exam[OWNER_ID]["step"] = "truefalse_answer"
         bot.send_message(OWNER_ID, "✅ أرسل الإجابة الصحيحة (صح أو خطأ):")
@@ -358,9 +403,22 @@ def admin_panel(call):
     markup.add(InlineKeyboardButton("➕ إضافة نقاط لمستخدم", callback_data="admin_add_points"))
     markup.add(InlineKeyboardButton("➖ خصم نقاط من مستخدم", callback_data="admin_remove_points"))
     markup.add(InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats"))
-    markup.add(InlineKeyboardButton("📋 قائمة الاختبارات", callback_data="admin_exams"))
+    markup.add(InlineKeyboardButton("📋 آخر 5 اختبارات", callback_data="admin_recent_exams"))
     markup.add(InlineKeyboardButton("📈 نتائج اختبار", callback_data="admin_results"))
     bot.send_message(OWNER_ID, "🔧 لوحة تحكم المالك", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_recent_exams")
+def admin_recent_exams(call):
+    if call.message.chat.id != OWNER_ID:
+        return
+    exams = get_recent_exams(5)
+    if not exams:
+        bot.send_message(OWNER_ID, "لا توجد اختبارات حتى الآن.")
+        return
+    txt = "📋 آخر 5 اختبارات تم إنشاؤها:\n\n"
+    for eid, title, code, created_at in exams:
+        txt += f"• {title}\n   رمز: {code}\n   تاريخ: {created_at[:19]}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+    bot.send_message(OWNER_ID, txt)
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_points")
 def admin_add_points(call):
@@ -410,19 +468,6 @@ def admin_stats(call):
     total_points = c.fetchone()[0] or 0
     bot.send_message(OWNER_ID, f"📊 إحصائيات البوت\n👥 الطلاب: {students}\n📚 الاختبارات: {exams}\n📝 المحاولات: {results}\n⭐ مجموع النقاط: {total_points}")
 
-@bot.callback_query_handler(func=lambda call: call.data == "admin_exams")
-def admin_exams(call):
-    if call.message.chat.id != OWNER_ID:
-        return
-    exams = get_exams_by_teacher(OWNER_ID)
-    if not exams:
-        bot.send_message(OWNER_ID, "لا توجد اختبارات.")
-        return
-    txt = "📋 قائمة الاختبارات\n"
-    for eid, title, code in exams:
-        txt += f"• {title}\n   رمز: {code}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
-    bot.send_message(OWNER_ID, txt)
-
 @bot.callback_query_handler(func=lambda call: call.data == "admin_results")
 def admin_results(call):
     if call.message.chat.id != OWNER_ID:
@@ -442,7 +487,7 @@ def show_results(message):
         return
     txt = f"📈 نتائج اختبار {exam['title']}\n\n"
     for sid, score, total, pct in results:
-        txt += f"👤 مستخدم {sid}: {score}/{total} ({pct:.1f}%)\n"
+        txt += f"👤 مستخدم {sid}: {score:.1f}/{total} ({pct:.1f}%)\n"
     bot.send_message(OWNER_ID, txt)
 
 # معالجة الروابط المباشرة
