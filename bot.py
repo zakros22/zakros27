@@ -188,35 +188,35 @@ def add_exam_start(call):
         bot.answer_callback_query(call.id, "غير مصرح")
         return
     temp_exam[OWNER_ID] = {"step": "title", "questions": [], "answers": []}
-    bot.send_message(OWNER_ID, "أرسل عنوان الاختبار:")
+    bot.send_message(OWNER_ID, "📌 أرسل عنوان الاختبار:")
     bot.register_next_step_handler(call.message, process_title)
 
 def process_title(message):
     temp_exam[OWNER_ID]["title"] = message.text.strip()
     temp_exam[OWNER_ID]["step"] = "question"
-    bot.send_message(OWNER_ID, "أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (text/mcq/truefalse):\nمثال:\nما عاصمة فرنسا؟\ntext")
+    bot.send_message(OWNER_ID, "➕ أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (text/mcq/truefalse):\nمثال:\nما عاصمة فرنسا؟\ntext")
 
 @bot.message_handler(func=lambda m: m.chat.id == OWNER_ID and temp_exam.get(OWNER_ID, {}).get("step") == "question")
 def process_question(message):
     lines = message.text.strip().split('\n')
     if len(lines) < 2:
-        bot.send_message(OWNER_ID, "اكتب السؤال ثم النوع في سطر جديد.")
+        bot.send_message(OWNER_ID, "❌ اكتب السؤال ثم النوع في سطر جديد.")
         return
     q_text = lines[0]
     q_type = lines[1].lower()
     if q_type not in ["text", "mcq", "truefalse"]:
-        bot.send_message(OWNER_ID, "النوع غير صالح. اختر: text, mcq, truefalse")
+        bot.send_message(OWNER_ID, "❌ النوع غير صالح. اختر: text, mcq, truefalse")
         return
     temp_exam[OWNER_ID]["current_q"] = {"text": q_text, "type": q_type}
     if q_type == "mcq":
         temp_exam[OWNER_ID]["step"] = "mcq_options"
-        bot.send_message(OWNER_ID, "أرسل الخيارات مفصولة بفواصل (مثال: باريس, لندن, برلين):")
+        bot.send_message(OWNER_ID, "📋 أرسل الخيارات مفصولة بفواصل (مثال: باريس, لندن, برلين):")
     elif q_type == "truefalse":
         temp_exam[OWNER_ID]["step"] = "truefalse_answer"
-        bot.send_message(OWNER_ID, "أرسل الإجابة الصحيحة (صح أو خطأ):")
+        bot.send_message(OWNER_ID, "✅ أرسل الإجابة الصحيحة (صح أو خطأ):")
     else:
         temp_exam[OWNER_ID]["step"] = "essay_answer"
-        bot.send_message(OWNER_ID, "أرسل الإجابة النموذجية:")
+        bot.send_message(OWNER_ID, "✍️ أرسل الإجابة النموذجية:")
 
 @bot.message_handler(func=lambda m: m.chat.id == OWNER_ID and temp_exam.get(OWNER_ID, {}).get("step") == "mcq_options")
 def process_mcq_options(message):
@@ -235,7 +235,7 @@ def process_mcq_answer(message):
 def process_truefalse_answer(message):
     ans = message.text.strip()
     if ans not in ["صح", "خطأ"]:
-        bot.send_message(OWNER_ID, "أرسل 'صح' أو 'خطأ'")
+        bot.send_message(OWNER_ID, "❌ أرسل 'صح' أو 'خطأ'")
         return
     temp_exam[OWNER_ID]["current_q"]["answer"] = ans
     save_question(OWNER_ID)
@@ -256,14 +256,14 @@ def save_question(uid):
 def ask_next(uid):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("➕ إضافة سؤال", callback_data="next_q"), InlineKeyboardButton("✅ إنهاء", callback_data="finish_exam"))
-    bot.send_message(uid, "تم حفظ السؤال. ماذا تريد؟", reply_markup=markup)
+    bot.send_message(uid, "✅ تم حفظ السؤال. ماذا تريد؟", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "next_q")
 def next_question(call):
     if call.message.chat.id != OWNER_ID:
         return
     temp_exam[OWNER_ID]["step"] = "question"
-    bot.edit_message_text("أضف السؤال التالي (سؤال ثم نوع في سطر جديد):", OWNER_ID, call.message.message_id)
+    bot.edit_message_text("➕ أضف السؤال التالي (سؤال ثم نوع في سطر جديد):", OWNER_ID, call.message.message_id)
     bot.register_next_step_handler(call.message, process_question)
 
 @bot.callback_query_handler(func=lambda call: call.data == "finish_exam")
