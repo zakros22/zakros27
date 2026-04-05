@@ -6,11 +6,12 @@ import threading
 from deep_translator import GoogleTranslator
 import time
 import re
-import requests
+from PIL import Image, ImageDraw, ImageFont
+import arabic_reshaper
+from bidi.algorithm import get_display
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -18,11 +19,12 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# تحميل خط عربي من جوجل (يدعم العربية ولو بشكل بسيط)
+# تحميل خط عربي (سيتم تنزيله من الإنترنت)
 FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
 FONT_PATH = "NotoSansArabic-Regular.ttf"
 if not os.path.exists(FONT_PATH):
     try:
+        import requests
         print("Downloading Arabic font...")
         r = requests.get(FONT_URL, timeout=30)
         with open(FONT_PATH, "wb") as f:
@@ -32,17 +34,31 @@ if not os.path.exists(FONT_PATH):
         print("Font download failed, using fallback.")
         FONT_PATH = None
 
-# تسجيل الخط إذا تم تحميله
-if FONT_PATH and os.path.exists(FONT_PATH):
-    try:
-        pdfmetrics.registerFont(TTFont('NotoSansArabic', FONT_PATH))
-        ARABIC_FONT = 'NotoSansArabic'
-    except:
-        ARABIC_FONT = 'Helvetica'
-else:
-    ARABIC_FONT = 'Helvetica'
+def reshape_arabic(text):
+    """إعادة تشكيل النص العربي لظهور الحروف متصلة"""
+    reshaped = arabic_reshaper.reshape(text)
+    return get_display(reshaped)
 
-# اللغات المدعومة
+def text_to_image(text, font_path, image_path, width=500):
+    """تحويل النص العربي إلى صورة PNG"""
+    try:
+        font = ImageFont.truetype(font_path, 20)
+    except:
+        font = ImageFont.load_default()
+    # حساب أبعاد الصورة
+    dummy_img = Image.new('RGB', (1,1))
+    draw = ImageDraw.Draw(dummy_img)
+    bbox = draw.textbbox((0,0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    img_width = min(width, text_width + 20)
+    img_height = text_height + 20
+    img = Image.new('RGB', (img_width, img_height), color=(255,255,255))
+    draw = ImageDraw.Draw(img)
+    draw.text((10, 10), text, font=font, fill=(0,0,0))
+    img.save(image_path)
+    return image_path
+
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -54,6 +70,7 @@ user_sessions = {}
 
 def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
     translator = GoogleTranslator(source='auto', target=target_lang)
+    # تقسيم النص إلى جمل
     sentences = re.split(r'(?<=[.!?؟])\s+', text)
     chunks = []
     current = ""
@@ -66,7 +83,6 @@ def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
             current = sent + " "
     if current:
         chunks.append(current.strip())
-
     translated_parts = []
     total = len(chunks)
     for i, chunk in enumerate(chunks):
@@ -74,48 +90,67 @@ def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
             translated_parts.append(translator.translate(chunk))
             if (i+1) % 5 == 0 or i+1 == total:
                 if user_id:
-                    bot.send_message(user_id, f"Translation progress: {i+1}/{total} parts")
+                    bot.send_message(user_id, f"Translation: {i+1}/{total} parts")
         except Exception as e:
-            translated_parts.append(f"[Error in part {i+1}]")
+            translated_parts.append(f"[Error part {i+1}]")
         time.sleep(0.3)
     return " ".join(translated_parts)
 
 def create_bilingual_pdf(original, translated, output_path):
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
-    c.setFont(ARABIC_FONT, 12)
-    
-    # النص الأصلي
-    c.setFillColorRGB(0, 0, 0.6)
-    c.drawString(50, height - 50, "Original Text:")
-    c.setFillColorRGB(0, 0, 0)
-    y = height - 70
-    for line in original.split('\n'):
-        if y < 50:
+    y = height - 50
+    # تقسيم النصوص إلى فقرات (بحد أقصى 500 حرف لكل فقرة لتتناسب مع الصفحة)
+    def split_paragraphs(text, max_len=400):
+        paras = []
+        current = ""
+        for sent in text.split('. '):
+            if len(current) + len(sent) + 2 <= max_len:
+                current += sent + ". "
+            else:
+                if current:
+                    paras.append(current.strip())
+                current = sent + ". "
+        if current:
+            paras.append(current.strip())
+        return paras
+
+    original_paras = split_paragraphs(original)
+    translated_paras = split_paragraphs(translated)
+
+    # يجب أن يكون عدد الفقرات متساوياً تقريباً؛ نكرر الترجمة إذا نقصت
+    if len(translated_paras) < len(original_paras):
+        translated_paras += [""] * (len(original_paras) - len(translated_paras))
+
+    for i, (orig_para, trans_para) in enumerate(zip(original_paras, translated_paras)):
+        # النص الأصلي (بعد إعادة التشكيل)
+        reshaped_orig = reshape_arabic(orig_para) if any('\u0600' <= c <= '\u06FF' for c in orig_para) else orig_para
+        # النص المترجم (إعادة تشكيل إذا كان عربياً)
+        reshaped_trans = reshape_arabic(trans_para) if any('\u0600' <= c <= '\u06FF' for c in trans_para) else trans_para
+
+        # إنشاء صورة للنص الأصلي
+        img_orig_path = tempfile.mktemp(suffix='.png')
+        text_to_image(reshaped_orig, FONT_PATH, img_orig_path, width=500)
+        img_orig = ImageReader(img_orig_path)
+        c.drawImage(img_orig, 50, y - 100, width=500, height=80, preserveAspectRatio=True)
+        y -= 100
+        # إنشاء صورة للنص المترجم
+        img_trans_path = tempfile.mktemp(suffix='.png')
+        text_to_image(reshaped_trans, FONT_PATH, img_trans_path, width=500)
+        img_trans = ImageReader(img_trans_path)
+        c.drawImage(img_trans, 50, y - 100, width=500, height=80, preserveAspectRatio=True)
+        y -= 130
+        # إذا كان المكان ضيقاً، نبدأ صفحة جديدة
+        if y < 100:
             c.showPage()
             y = height - 50
-            c.setFont(ARABIC_FONT, 12)
-        c.drawString(50, y, line[:100])
-        y -= 15
-    
-    # النص المترجم
-    c.showPage()
-    c.setFont(ARABIC_FONT, 12)
-    c.setFillColorRGB(0, 0.5, 0)
-    c.drawString(50, height - 50, "Translated Text:")
-    c.setFillColorRGB(0, 0, 0)
-    y = height - 70
-    for line in translated.split('\n'):
-        if y < 50:
-            c.showPage()
-            y = height - 50
-            c.setFont(ARABIC_FONT, 12)
-        c.drawString(50, y, line[:100])
-        y -= 15
-    
+        # حذف الصور المؤقتة
+        os.unlink(img_orig_path)
+        os.unlink(img_trans_path)
+
     # تذييل الحقوق
-    c.setFillColorRGB(0.5, 0.5, 0.5)
-    c.setFont(ARABIC_FONT, 8)
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.5,0.5,0.5)
     c.drawString(50, 30, "Translation by @zakros_onlinebot")
     c.save()
 
@@ -150,7 +185,7 @@ def process_translation(user_id, target_lang, target_name):
 def start(message):
     bot.send_message(
         message.chat.id,
-        "Send me a .txt file or a text message. I will translate it into the language you choose and send you a PDF.\nBot credit: @zakros_onlinebot"
+        "Send me a .txt file or a text message. I will translate it and send you a PDF.\nBot credit: @zakros_onlinebot"
     )
 
 @bot.message_handler(content_types=['document'])
