@@ -363,7 +363,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
 
-# ========== 6. معالجة الملفات والنصوص (محسنة) ==========
+# ========== 6. معالجة الملفات والنصوص (معدلة لدعم .txt و .TXT) ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
@@ -372,7 +372,8 @@ def handle_doc(message):
         return
     
     file_name = message.document.file_name
-    if not file_name.endswith('.txt'):
+    # التحقق من الامتداد بأي حالة (TXT, txt, Txt, tXt)
+    if not file_name.lower().endswith('.txt'):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط")
         return
     
