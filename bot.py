@@ -151,19 +151,18 @@ def get_grade_message(percentage):
         return ("حظ أوفر! 💪", "لا تيأس، حاول مرة أخرى بعد المذاكرة", (255, 0, 0))
 
 def generate_certificate(user_id, exam_title, score, total, percentage):
-    """شهادة احترافية ملونة"""
+    """شهادة احترافية ملونة باستخدام الخط العادي فقط"""
     pdf = FPDF()
     pdf.add_page()
     
-    # استخدام الخط العربي
+    # استخدام الخط العربي (بدون نسخة عريضة)
     if FONT_PATH and os.path.exists(FONT_PATH):
         pdf.add_font('Noto', '', FONT_PATH, uni=True)
-        font_name = 'Noto'
+        pdf.set_font('Noto', '', 20)
     else:
-        font_name = 'Helvetica'
+        pdf.set_font("Helvetica", "", 20)
     
     # عنوان الشهادة
-    pdf.set_font(font_name, '', 24)
     pdf.set_text_color(0, 51, 102)  # أزرق غامق
     pdf.cell(0, 25, "شهادة إتمام الاختبار", 0, 1, 'C')
     pdf.ln(5)
@@ -173,7 +172,10 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.line(30, 45, 180, 45)
     
     # معلومات الطالب والاختبار
-    pdf.set_font(font_name, '', 14)
+    if FONT_PATH:
+        pdf.set_font('Noto', '', 12)
+    else:
+        pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(0, 0, 0)
     pdf.cell(0, 12, f"الطالب/الطالبة رقم: {user_id}", 0, 1, 'C')
     pdf.cell(0, 12, f"الاختبار: {exam_title}", 0, 1, 'C')
@@ -190,27 +192,42 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.rect(40, 105, 130, 50)
     
     # النتيجة داخل المربع
-    pdf.set_font(font_name, 'B', 18)
+    if FONT_PATH:
+        pdf.set_font('Noto', '', 16)
+    else:
+        pdf.set_font("Helvetica", "B", 16)
     pdf.set_text_color(color[0], color[1], color[2])
     pdf.set_xy(45, 112)
     pdf.cell(120, 12, f"{score:.1f} / {total}", 0, 1, 'C')
-    pdf.set_font(font_name, '', 14)
+    if FONT_PATH:
+        pdf.set_font('Noto', '', 12)
+    else:
+        pdf.set_font("Helvetica", "", 12)
     pdf.set_xy(45, 128)
     pdf.cell(120, 12, f"({percentage:.1f}%)", 0, 1, 'C')
     
     pdf.ln(20)
     
     # عبارة تحفيزية
-    pdf.set_font(font_name, '', 16)
+    if FONT_PATH:
+        pdf.set_font('Noto', '', 14)
+    else:
+        pdf.set_font("Helvetica", "", 14)
     pdf.set_text_color(color[0], color[1], color[2])
     pdf.cell(0, 12, grade_msg, 0, 1, 'C')
-    pdf.set_font(font_name, '', 12)
+    if FONT_PATH:
+        pdf.set_font('Noto', '', 10)
+    else:
+        pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(100, 100, 100)
     pdf.cell(0, 10, advice, 0, 1, 'C')
     pdf.ln(15)
     
     # حقوق البوت
-    pdf.set_font(font_name, '', 10)
+    if FONT_PATH:
+        pdf.set_font('Noto', '', 9)
+    else:
+        pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(128, 128, 128)
     pdf.set_y(-25)
     pdf.cell(0, 8, "@ZeQuiz_Bot", 0, 0, 'C')
