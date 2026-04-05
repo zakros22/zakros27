@@ -18,17 +18,26 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. تحميل خط DejaVuSans (يدعم العربية واللاتينية) ==========
-FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+# ========== 1. تحميل خط DejaVuSans (يدعم جميع اللغات) ==========
+FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip"
 FONT_PATH = "DejaVuSans.ttf"
+
 if not os.path.exists(FONT_PATH):
     try:
+        import zipfile
+        import io
+        print("Downloading font...")
         r = requests.get(FONT_URL, timeout=30)
-        with open(FONT_PATH, "wb") as f:
-            f.write(r.content)
-    except:
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            with z.open("dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf") as f:
+                with open(FONT_PATH, "wb") as out:
+                    out.write(f.read())
+        print("Font installed.")
+    except Exception as e:
+        print(f"Font download failed: {e}")
         FONT_PATH = None
 
+# ========== 2. إعدادات PDF ==========
 class PDF(FPDF):
     def __init__(self):
         super().__init__()
@@ -38,7 +47,6 @@ class PDF(FPDF):
         else:
             self.set_font('Helvetica', '', 12)
             self.font_name = 'Helvetica'
-        self.add_page()
     
     def header(self):
         if self.page_no() > 1:
@@ -53,9 +61,7 @@ class PDF(FPDF):
         self.set_text_color(128, 128, 128)
         self.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
     
-    def add_section(self, title, text, color=(0,0,0), page_break_before=False):
-        if page_break_before:
-            self.add_page()
+    def add_paragraph(self, title, text, color=(0,0,0)):
         self.set_font(self.font_name, '', 12)
         self.set_text_color(color[0], color[1], color[2])
         self.cell(0, 8, title, ln=1)
@@ -64,7 +70,7 @@ class PDF(FPDF):
         self.multi_cell(0, 7, text)
         self.ln(6)
 
-# ========== 2. قاعدة البيانات (نفس الكود السابق) ==========
+# ========== 3. قاعدة البيانات ==========
 DB_NAME = "bot_data.db"
 
 def get_db_connection():
@@ -149,7 +155,7 @@ def add_referral(referrer_id, referred_id):
         except:
             time.sleep(0.5)
 
-# ========== 3. دوال الترجمة ==========
+# ========== 4. دوال الترجمة والتقدم ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -167,44 +173,25 @@ def update_progress(user_id, status_msg, stage, percent, details=""):
     text = f"{stage}\n[{bar}] {percent}%\n{details}"
     bot.edit_message_text(text, user_id, status_msg.message_id)
 
-def split_text_for_translation(text, max_len=3000):
+def split_into_sections(text, max_sentences=3):
+    """تقسيم النص إلى أقسام (كل قسم = عدد معين من الجمل)"""
     sentences = re.split(r'(?<=[.!?؟])\s+', text)
-    parts = []
-    current = ""
+    sections = []
+    current = []
     for sent in sentences:
-        if len(current) + len(sent) + 2 <= max_len:
-            current += sent + " "
-        else:
-            if current:
-                parts.append(current.strip())
-            current = sent + " "
+        current.append(sent)
+        if len(current) >= max_sentences:
+            sections.append(" ".join(current))
+            current = []
     if current:
-        parts.append(current.strip())
-    return parts if parts else [text[:max_len]]
+        sections.append(" ".join(current))
+    return sections if sections else [text[:500]]
 
-def translate_long_text(text, target_lang, user_id, status_msg):
-    parts = split_text_for_translation(text)
-    translated_parts = []
-    total = len(parts)
-    for i, part in enumerate(parts, 1):
-        percent = int((i / total) * 100)
-        update_progress(user_id, status_msg, "🌍 جاري الترجمة...", percent, f"الجزء {i} من {total}")
-        try:
-            translator = GoogleTranslator(source='auto', target=target_lang)
-            translated_parts.append(translator.translate(part))
-        except:
-            translated_parts.append(f"[Error in part {i}]")
-        time.sleep(0.3)
-    return " ".join(translated_parts)
-
-def create_pdf(original, translated, output_path, user_id, status_msg):
-    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
-    pdf = PDF()
-    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 90, "إضافة النص الأصلي...")
-    pdf.add_section("📖 Original Text / النص الأصلي", original, color=(0, 0, 150), page_break_before=False)
-    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 95, "إضافة الترجمة...")
-    pdf.add_section("🌍 Translated Text / النص المترجم", translated, color=(0, 100, 0), page_break_before=True)
-    pdf.output(output_path)
+def translate_section(section, target_lang, user_id, status_msg, idx, total):
+    percent = int((idx / total) * 100)
+    update_progress(user_id, status_msg, "🌍 جاري الترجمة...", percent, f"الجزء {idx} من {total}")
+    translator = GoogleTranslator(source='auto', target=target_lang)
+    return translator.translate(section)
 
 def process_translation(user_id, target_lang, target_name):
     session = user_sessions.get(user_id)
@@ -219,13 +206,31 @@ def process_translation(user_id, target_lang, target_name):
     filename = session.get("filename", "user_text.txt")
     status_msg = bot.send_message(user_id, "🔄 جاري تجهيز المعالجة...")
     try:
-        update_progress(user_id, status_msg, "📥 جاري تجهيز الملف...", 5, "")
-        parts = split_text_for_translation(original_text)
-        total_parts = len(parts)
-        update_progress(user_id, status_msg, "✂️ جاري تقسيم النص...", 15, f"عدد الأجزاء: {total_parts}")
-        translated = translate_long_text(original_text, target_lang, user_id, status_msg)
+        update_progress(user_id, status_msg, "✂️ جاري تقسيم النص إلى أقسام...", 10, "")
+        sections = split_into_sections(original_text)
+        total_sections = len(sections)
+        update_progress(user_id, status_msg, "✅ تم التقسيم", 20, f"عدد الأقسام: {total_sections}")
+        
+        # ترجمة كل قسم
+        translated_sections = []
+        for i, sec in enumerate(sections, 1):
+            translated = translate_section(sec, target_lang, user_id, status_msg, i, total_sections)
+            translated_sections.append(translated)
+            time.sleep(0.3)
+        
+        # إنشاء PDF
+        update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
+        pdf = PDF()
+        for i, (orig, trans) in enumerate(zip(sections, translated_sections), 1):
+            if i > 1:
+                pdf.add_page()
+            pdf.add_paragraph(f"📖 Part {i} - Original Text / النص الأصلي", orig, color=(0, 0, 150))
+            pdf.add_paragraph(f"🌍 Part {i} - Translated Text / النص المترجم", trans, color=(0, 100, 0))
+        
         pdf_path = tempfile.mktemp(suffix='.pdf')
-        create_pdf(original_text, translated, pdf_path, user_id, status_msg)
+        pdf.output(pdf_path)
+        
+        # حفظ النقاط وإرسال الملف
         update_points(user_id, -1)
         new_points = get_user(user_id)["points"]
         update_progress(user_id, status_msg, "📤 جاري إرسال الملف...", 100, "اكتمل!")
@@ -238,7 +243,7 @@ def process_translation(user_id, target_lang, target_name):
     except Exception as e:
         bot.edit_message_text(f"❌ فشل: {str(e)[:200]}", user_id, status_msg.message_id)
 
-# ========== 4. أوامر البوت ==========
+# ========== 5. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
@@ -320,7 +325,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
 
-# ========== 5. معالجة الملفات والنصوص ==========
+# ========== 6. معالجة الملفات والنصوص ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
