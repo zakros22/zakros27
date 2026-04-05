@@ -35,8 +35,8 @@ if not os.path.exists(AR_FONT_PATH):
         with open(AR_FONT_PATH, "wb") as f:
             f.write(r.content)
         print("Arabic font installed.")
-    except Exception as e:
-        print(f"Arabic font download failed: {e}")
+    except:
+        print("Arabic font download failed")
 
 if not os.path.exists(LATIN_FONT_PATH):
     try:
@@ -47,13 +47,16 @@ if not os.path.exists(LATIN_FONT_PATH):
                 with open(LATIN_FONT_PATH, "wb") as out:
                     out.write(f.read())
         print("Latin font installed.")
-    except Exception as e:
-        print(f"Latin font download failed: {e}")
+    except:
+        print("Latin font download failed")
 
 def reshape_arabic(text):
     if any('\u0600' <= c <= '\u06FF' for c in text):
-        reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
+        try:
+            reshaped = arabic_reshaper.reshape(text)
+            return get_display(reshaped)
+        except:
+            return text
     return text
 
 # ========== 2. إعدادات PDF ==========
@@ -180,7 +183,7 @@ def add_referral(referrer_id, referred_id):
         except:
             time.sleep(0.5)
 
-# ========== 4. دوال الترجمة والتقدم ==========
+# ========== 4. دوال الترجمة ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -238,7 +241,7 @@ def translate_section(section, target_lang, user_id, status_msg, idx, total):
 def process_translation(user_id, target_lang, target_name):
     session = user_sessions.get(user_id)
     if not session:
-        bot.send_message(user_id, "❌ انتهت الجلسة، أعد إرسال الملف.")
+        bot.send_message(user_id, "❌ انتهت الجلسة، أعد إرسال النص/الملف.")
         return
     user = get_user(user_id)
     if user["points"] <= 0:
@@ -369,7 +372,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
 
-# ========== 6. معالجة الملفات والنصوص (المعدلة لحل مشكلة الملفات) ==========
+# ========== 6. معالجة الملفات والنصوص ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
@@ -378,7 +381,6 @@ def handle_doc(message):
         return
     
     file_name = message.document.file_name
-    # قبول .txt و .TXT فقط
     if not file_name.lower().endswith('.txt'):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط")
         return
@@ -389,12 +391,10 @@ def handle_doc(message):
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
         
-        # محاولة فك الترميز بعدة طرق
         text = None
-        for encoding in ['utf-8', 'cp1256', 'iso-8859-6', 'windows-1256', 'latin-1']:
+        for encoding in ['utf-8', 'cp1256', 'windows-1256', 'iso-8859-6', 'latin-1']:
             try:
                 text = downloaded.decode(encoding)
-                print(f"✅ Decoded with {encoding}")
                 break
             except:
                 continue
@@ -407,9 +407,6 @@ def handle_doc(message):
         if len(text) < 5:
             bot.edit_message_text("❌ الملف فارغ أو النص قصير جداً.", user_id, status_msg.message_id)
             return
-        
-        if len(text) > 50000:
-            bot.edit_message_text("⚠️ الملف كبير جداً (>50,000 حرف). قد تستغرق المعالجة وقتاً طويلاً.", user_id, status_msg.message_id)
         
         user_sessions[user_id] = {"text": text, "filename": file_name}
         bot.delete_message(user_id, status_msg.message_id)
