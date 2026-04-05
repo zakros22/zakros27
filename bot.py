@@ -10,6 +10,7 @@ from datetime import datetime
 from fpdf import FPDF
 import difflib
 import re
+import requests
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -18,7 +19,18 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. قاعدة البيانات ==========
+# ========== 1. تحميل خط يدعم اللغة العربية ==========
+FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
+FONT_PATH = "NotoSansArabic-Regular.ttf"
+if not os.path.exists(FONT_PATH):
+    try:
+        r = requests.get(FONT_URL, timeout=30)
+        with open(FONT_PATH, "wb") as f:
+            f.write(r.content)
+    except:
+        FONT_PATH = None
+
+# ========== 2. قاعدة البيانات ==========
 conn = sqlite3.connect("exam.db", check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS exams (
@@ -107,14 +119,12 @@ def add_referral(referrer_id, referred_id):
     conn.commit()
 
 def calculate_essay_score(user_answer, correct_answer):
-    """حساب نسبة التطابق بين إجابة الطالب والإجابة النموذجية"""
     user_clean = user_answer.lower().strip()
     correct_clean = correct_answer.lower().strip()
     
     if user_clean == correct_clean:
         return 1.0, 100.0
     
-    # حساب عدد الكلمات المتطابقة
     user_words = set(re.findall(r'\w+', user_clean))
     correct_words = set(re.findall(r'\w+', correct_clean))
     if correct_words:
@@ -122,10 +132,7 @@ def calculate_essay_score(user_answer, correct_answer):
     else:
         word_match = 0
     
-    # حساب عدد الحروف المتطابقة
     char_match = difflib.SequenceMatcher(None, user_clean, correct_clean).ratio()
-    
-    # النسبة النهائية (70% كلمات + 30% حروف)
     final_ratio = (word_match * 0.7) + (char_match * 0.3)
     final_percentage = round(final_ratio * 100, 1)
     
@@ -134,34 +141,41 @@ def calculate_essay_score(user_answer, correct_answer):
 def generate_certificate(user_id, exam_title, score, total, percentage, details):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 18)
+    
+    # استخدام الخط العربي إذا كان موجوداً
+    if FONT_PATH and os.path.exists(FONT_PATH):
+        pdf.add_font('Noto', '', FONT_PATH, uni=True)
+        pdf.set_font('Noto', '', 16)
+    else:
+        pdf.set_font("Helvetica", "", 16)
+    
     pdf.cell(0, 15, "Certificate of Completion", 0, 1, 'C')
-    pdf.set_font("Helvetica", "", 12)
+    pdf.set_font_size(12)
     pdf.cell(0, 10, f"Student ID: {user_id}", 0, 1, 'C')
     pdf.cell(0, 10, f"Exam: {exam_title}", 0, 1, 'C')
     pdf.cell(0, 10, f"Total Score: {score:.1f}/{total} ({percentage:.1f}%)", 0, 1, 'C')
     pdf.ln(5)
-    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_font_size(11)
     pdf.cell(0, 8, "Detailed Results:", 0, 1, 'L')
-    pdf.set_font("Helvetica", "", 9)
+    pdf.set_font_size(9)
     
     for i, d in enumerate(details[:20]):
         q_type = d.get("type", "unknown")
         if q_type == "essay":
-            type_text = "سؤال وجواب"
+            type_text = "Essay"
         elif q_type == "mcq":
-            type_text = "اختيار من متعدد"
+            type_text = "MCQ"
         else:
-            type_text = "صح/خطأ"
+            type_text = "True/False"
         
         pdf.cell(0, 5, f"Q{i+1}. {d['question'][:50]}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   النوع: {type_text}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   إجابتك: {d['user_answer'][:40]}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   الإجابة الصحيحة: {d['correct_answer'][:40]}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   Type: {type_text}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   Your answer: {d['user_answer'][:40]}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   Correct answer: {d['correct_answer'][:40]}", 0, 1, 'L')
         if q_type == "essay":
-            pdf.cell(0, 4, f"   النتيجة: {d['score']:.1f}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
+            pdf.cell(0, 4, f"   Score: {d['score']:.1f}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
         else:
-            pdf.cell(0, 4, f"   النتيجة: {int(d['score'])}/{int(d['max_score'])} ({d['percentage']:.0f}%)", 0, 1, 'L')
+            pdf.cell(0, 4, f"   Score: {int(d['score'])}/{int(d['max_score'])}", 0, 1, 'L')
         pdf.ln(2)
     
     pdf.set_y(-25)
@@ -172,7 +186,7 @@ def generate_certificate(user_id, exam_title, score, total, percentage, details)
     pdf.output(path)
     return path
 
-# ========== 2. أوامر البوت ==========
+# ========== 3. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.chat.id
@@ -209,7 +223,6 @@ def share_link(call):
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
 def enter_exam(call):
     user_id = call.message.chat.id
-    # دخول الاختبار مجاني، لا نستهلك نقاط
     bot.send_message(user_id, "🔗 أرسل رمز الاختبار (مثال: ABC123):")
     bot.register_next_step_handler(call.message, process_exam_code)
 
@@ -221,7 +234,6 @@ def process_exam_code(message):
         bot.send_message(user_id, "❌ رمز الاختبار غير صحيح.")
         return
     
-    # دخول الاختبار مجاني
     start_exam(user_id, exam)
 
 def start_exam(user_id, exam):
@@ -231,6 +243,7 @@ def start_exam(user_id, exam):
         "questions": exam["questions"],
         "answers": exam["answers"],
         "user_ans": [],
+        "scores": [],
         "index": 0
     }
     send_question(user_id)
@@ -270,10 +283,32 @@ def answer_callback(call):
     if not data:
         bot.answer_callback_query(call.id, "انتهت الجلسة")
         return
+    
+    idx = data["index"]
+    q = data["questions"][idx]
+    correct = data["answers"][idx]
+    
+    if q["type"] == "mcq":
+        is_correct = (answer == correct)
+        score = 1.0 if is_correct else 0.0
+        percentage = 100.0 if is_correct else 0.0
+        result_text = "✅ صحيح" if is_correct else "❌ خطأ"
+    else:  # truefalse
+        is_correct = (answer == correct)
+        score = 1.0 if is_correct else 0.0
+        percentage = 100.0 if is_correct else 0.0
+        result_text = "✅ صحيح" if is_correct else "❌ خطأ"
+    
     data["user_ans"].append(answer)
+    data["scores"].append({"score": score, "percentage": percentage})
     data["index"] += 1
+    
     bot.answer_callback_query(call.id)
     bot.delete_message(user_id, call.message.message_id)
+    
+    # إرسال التصحيح الفوري
+    bot.send_message(user_id, f"📊 تصحيح السؤال {idx+1}: {result_text}\nالنتيجة: {score}/{1} ({percentage:.0f}%)")
+    
     send_question(user_id)
 
 def process_essay(message, user_id):
@@ -281,65 +316,52 @@ def process_essay(message, user_id):
     data = user_answers.get(user_id)
     if not data:
         return
+    
+    idx = data["index"]
+    q = data["questions"][idx]
+    correct = data["answers"][idx]
+    
+    essay_score, essay_percentage = calculate_essay_score(answer, correct)
+    
     data["user_ans"].append(answer)
+    data["scores"].append({"score": essay_score, "percentage": essay_percentage})
     data["index"] += 1
+    
+    # إرسال التصحيح الفوري
+    bot.send_message(user_id, f"📊 تصحيح السؤال {idx+1}:\nالنتيجة: {essay_score:.1f}/{1} ({essay_percentage:.0f}%)\nالإجابة الصحيحة: {correct}")
+    
     send_question(user_id)
 
 def finish_exam(user_id):
     data = user_answers.pop(user_id, None)
     if not data:
         return
+    
     total = len(data["questions"])
-    score = 0.0
+    total_score = sum(s["score"] for s in data["scores"])
+    percentage = (total_score / total) * 100
+    
+    # تجميع التفاصيل للشهادة
     details = []
+    for i, (q, user_ans, correct, score_info) in enumerate(zip(data["questions"], data["user_ans"], data["answers"], data["scores"])):
+        details.append({
+            "type": q["type"],
+            "question": q["text"],
+            "user_answer": user_ans[:100],
+            "correct_answer": correct,
+            "score": score_info["score"],
+            "max_score": 1.0,
+            "percentage": score_info["percentage"]
+        })
     
-    for i, (q, user_ans, correct) in enumerate(zip(data["questions"], data["user_ans"], data["answers"])):
-        if q["type"] == "essay":
-            essay_score, essay_percentage = calculate_essay_score(user_ans, correct)
-            score += essay_score
-            details.append({
-                "type": "essay",
-                "question": q["text"],
-                "user_answer": user_ans[:100],
-                "correct_answer": correct,
-                "score": essay_score,
-                "max_score": 1.0,
-                "percentage": essay_percentage
-            })
-        elif q["type"] == "mcq":
-            is_correct = (user_ans == correct)
-            score += 1 if is_correct else 0
-            details.append({
-                "type": "mcq",
-                "question": q["text"],
-                "user_answer": user_ans,
-                "correct_answer": correct,
-                "score": 1 if is_correct else 0,
-                "max_score": 1,
-                "percentage": 100 if is_correct else 0
-            })
-        else:  # truefalse
-            is_correct = (user_ans == correct)
-            score += 1 if is_correct else 0
-            details.append({
-                "type": "truefalse",
-                "question": q["text"],
-                "user_answer": user_ans,
-                "correct_answer": correct,
-                "score": 1 if is_correct else 0,
-                "max_score": 1,
-                "percentage": 100 if is_correct else 0
-            })
+    save_result(data["exam_id"], user_id, total_score, total, percentage, details)
     
-    percentage = (score / total) * 100
-    save_result(data["exam_id"], user_id, score, total, percentage, details)
-    
-    # إرسال النتيجة
-    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nنتيجتك: {score:.1f}/{total} ({percentage:.1f}%)")
+    # إرسال النتيجة النهائية
+    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nالنتيجة النهائية: {total_score:.1f}/{total} ({percentage:.1f}%)")
     
     # إنشاء وإرسال الشهادة
     try:
-        pdf_path = generate_certificate(user_id, data["title"], score, total, percentage, details)
+        pdf_path = generate_certificate(user_id, data["title"], total_score, total, percentage, details)
         if pdf_path and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
                 bot.send_document(user_id, f, caption="📜 شهادتك", visible_file_name="certificate.pdf")
@@ -347,7 +369,7 @@ def finish_exam(user_id):
     except Exception as e:
         bot.send_message(user_id, f"❌ حدث خطأ أثناء إنشاء الشهادة: {str(e)[:100]}")
 
-# ========== 3. إنشاء اختبار (يستهلك نقطة) ==========
+# ========== 4. إنشاء اختبار (يستهلك نقطة) ==========
 temp_exam = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_exam")
@@ -454,7 +476,6 @@ def finish_creation(call):
     if user_id not in temp_exam:
         return
     
-    # استهلاك نقطة واحدة لإنشاء الاختبار
     student = get_student(user_id)
     if student["points"] <= 0:
         bot.edit_message_text("❌ ليس لديك نقاط كافية لإنشاء الاختبار.", user_id, call.message.message_id)
@@ -468,7 +489,7 @@ def finish_creation(call):
     
     bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_points}", user_id, call.message.message_id)
 
-# ========== 4. لوحة تحكم المالك ==========
+# ========== 5. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
 def admin_panel(call):
     if call.message.chat.id != OWNER_ID:
@@ -575,7 +596,6 @@ def handle_exam_link(message):
     if not exam:
         bot.send_message(message.chat.id, "❌ رابط غير صحيح.")
         return
-    # دخول الاختبار مجاني
     start_exam(message.chat.id, exam)
 
 if __name__ == "__main__":
