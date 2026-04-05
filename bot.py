@@ -8,10 +8,8 @@ import re
 import time
 import threading
 import tempfile
-from fpdf import FPDF
 import requests
-import arabic_reshaper
-from bidi.algorithm import get_display
+from fpdf import FPDF
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -20,9 +18,9 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. تحميل الخط العالمي ==========
-FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
-FONT_PATH = "NotoSansArabic-Regular.ttf"
+# ========== 1. تحميل خط DejaVuSans (يدعم العربية واللاتينية) ==========
+FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
+FONT_PATH = "DejaVuSans.ttf"
 if not os.path.exists(FONT_PATH):
     try:
         r = requests.get(FONT_URL, timeout=30)
@@ -31,21 +29,16 @@ if not os.path.exists(FONT_PATH):
     except:
         FONT_PATH = None
 
-def reshape_text(text):
-    if any('\u0600' <= c <= '\u06FF' for c in text):
-        return get_display(arabic_reshaper.reshape(text))
-    return text
-
 class PDF(FPDF):
     def __init__(self):
         super().__init__()
         if FONT_PATH and os.path.exists(FONT_PATH):
-            self.add_font('Noto', '', FONT_PATH, uni=True)
-            self.font_name = 'Noto'
+            self.add_font('DejaVu', '', FONT_PATH, uni=True)
+            self.font_name = 'DejaVu'
         else:
             self.set_font('Helvetica', '', 12)
             self.font_name = 'Helvetica'
-        self.add_page()  # فتح صفحة أولى
+        self.add_page()
     
     def header(self):
         if self.page_no() > 1:
@@ -68,11 +61,10 @@ class PDF(FPDF):
         self.cell(0, 8, title, ln=1)
         self.set_font(self.font_name, '', 11)
         self.set_text_color(0, 0, 0)
-        text = reshape_text(text)
         self.multi_cell(0, 7, text)
         self.ln(6)
 
-# ========== 2. قاعدة البيانات ==========
+# ========== 2. قاعدة البيانات (نفس الكود السابق) ==========
 DB_NAME = "bot_data.db"
 
 def get_db_connection():
@@ -157,7 +149,7 @@ def add_referral(referrer_id, referred_id):
         except:
             time.sleep(0.5)
 
-# ========== 3. دوال الترجمة والتقدم ==========
+# ========== 3. دوال الترجمة ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -207,18 +199,11 @@ def translate_long_text(text, target_lang, user_id, status_msg):
 
 def create_pdf(original, translated, output_path, user_id, status_msg):
     update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
-    
-    pdf = PDF()  # هنا يتم فتح صفحة أولى تلقائياً
-    
-    # النص الأصلي في نفس الصفحة الأولى
+    pdf = PDF()
     update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 90, "إضافة النص الأصلي...")
-    pdf.add_section("📖 النص الأصلي / Original Text", original, color=(0, 0, 150), page_break_before=False)
-    
-    # النص المترجم في صفحة جديدة
+    pdf.add_section("📖 Original Text / النص الأصلي", original, color=(0, 0, 150), page_break_before=False)
     update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 95, "إضافة الترجمة...")
-    pdf.add_section("🌍 النص المترجم / Translated Text", translated, color=(0, 100, 0), page_break_before=True)
-    
-    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 98, "إضافة حقوق البوت...")
+    pdf.add_section("🌍 Translated Text / النص المترجم", translated, color=(0, 100, 0), page_break_before=True)
     pdf.output(output_path)
 
 def process_translation(user_id, target_lang, target_name):
@@ -226,47 +211,30 @@ def process_translation(user_id, target_lang, target_name):
     if not session:
         bot.send_message(user_id, "❌ انتهت الجلسة، أعد إرسال الملف.")
         return
-    
     user = get_user(user_id)
     if user["points"] <= 0:
         bot.send_message(user_id, "❌ رصيدك لا يكفي. استخدم /share")
         return
-    
     original_text = session["text"]
     filename = session.get("filename", "user_text.txt")
-    
     status_msg = bot.send_message(user_id, "🔄 جاري تجهيز المعالجة...")
-    
     try:
         update_progress(user_id, status_msg, "📥 جاري تجهيز الملف...", 5, "")
-        
-        # تقسيم النص
         parts = split_text_for_translation(original_text)
         total_parts = len(parts)
         update_progress(user_id, status_msg, "✂️ جاري تقسيم النص...", 15, f"عدد الأجزاء: {total_parts}")
-        
-        # الترجمة
         translated = translate_long_text(original_text, target_lang, user_id, status_msg)
-        
-        # إنشاء PDF
         pdf_path = tempfile.mktemp(suffix='.pdf')
         create_pdf(original_text, translated, pdf_path, user_id, status_msg)
-        
-        # حفظ النقاط
         update_points(user_id, -1)
         new_points = get_user(user_id)["points"]
-        
-        # إرسال الملف
         update_progress(user_id, status_msg, "📤 جاري إرسال الملف...", 100, "اكتمل!")
         time.sleep(1)
-        
         with open(pdf_path, 'rb') as f:
             bot.send_document(user_id, f, caption=f"✅ تمت الترجمة إلى {target_name}\n⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot", visible_file_name=f"{filename}_{target_lang}.pdf")
-        
         os.unlink(pdf_path)
         bot.delete_message(user_id, status_msg.message_id)
         del user_sessions[user_id]
-        
     except Exception as e:
         bot.edit_message_text(f"❌ فشل: {str(e)[:200]}", user_id, status_msg.message_id)
 
@@ -402,10 +370,8 @@ def translate_callback(call):
     if not session:
         bot.answer_callback_query(call.id, "انتهت الجلسة، أعد الإرسال", True)
         return
-    
     bot.answer_callback_query(call.id, f"جاري الترجمة إلى {target_name}...")
     bot.edit_message_reply_markup(user_id, call.message.message_id, reply_markup=None)
-    
     thread = threading.Thread(target=process_translation, args=(user_id, target, target_name))
     thread.daemon = True
     thread.start()
