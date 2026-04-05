@@ -9,6 +9,7 @@ import random
 from datetime import datetime
 from fpdf import FPDF
 import difflib
+import time
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -70,10 +71,6 @@ def get_all_exams_by_teacher(teacher_id):
     c.execute("SELECT id, title, link_code, created_at FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
     return c.fetchall()
 
-def get_recent_exams(limit=5):
-    c.execute("SELECT id, title, link_code, created_at FROM exams ORDER BY created_at DESC LIMIT ?", (limit,))
-    return c.fetchall()
-
 def save_result(exam_id, student_id, score, total, percentage, details):
     c.execute("INSERT INTO results (exam_id, student_id, score, total, percentage, details, date) VALUES (?,?,?,?,?,?,?)",
               (exam_id, student_id, score, total, percentage, json.dumps(details), datetime.now().isoformat()))
@@ -118,49 +115,49 @@ def calculate_essay_score(user_answer, correct_answer):
     return round(ratio, 2)
 
 def generate_certificate(user_id, exam_title, score, total, percentage, details):
+    """إنشاء شهادة PDF بسيطة"""
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 20)
-    pdf.cell(0, 20, "Certificate of Completion", 0, 1, 'C')
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 15, "Certificate of Completion", 0, 1, 'C')
     pdf.set_font("Helvetica", "", 12)
     pdf.cell(0, 10, f"Student ID: {user_id}", 0, 1, 'C')
     pdf.cell(0, 10, f"Exam: {exam_title}", 0, 1, 'C')
-    pdf.cell(0, 10, f"Total Score: {score:.1f}/{total} ({percentage:.1f}%)", 0, 1, 'C')
+    pdf.cell(0, 10, f"Score: {score:.1f}/{total} ({percentage:.1f}%)", 0, 1, 'C')
     pdf.ln(5)
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 10, "Detailed Results:", 0, 1, 'L')
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 8, "Results:", 0, 1, 'L')
+    pdf.set_font("Helvetica", "", 9)
     
-    for i, d in enumerate(details):
+    for i, d in enumerate(details[:20]):  # حد أقصى 20 سؤال في الشهادة
         q_type = d.get("type", "unknown")
         if q_type == "essay":
-            q_type_text = "سؤال وجواب (Essay)"
+            type_text = "Essay"
         elif q_type == "mcq":
-            q_type_text = "اختيار من متعدد (MCQ)"
-        elif q_type == "truefalse":
-            q_type_text = "صح/خطأ (True/False)"
+            type_text = "MCQ"
         else:
-            q_type_text = "غير محدد"
+            type_text = "True/False"
         
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(0, 6, f"Q{i+1}: {d['question'][:60]}", 0, 1, 'L')
-        pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 5, f"   Type: {q_type_text}", 0, 1, 'L')
-        pdf.cell(0, 5, f"   Your answer: {d['user_answer'][:50]}", 0, 1, 'L')
-        pdf.cell(0, 5, f"   Correct answer: {d['correct_answer'][:50]}", 0, 1, 'L')
+        pdf.cell(0, 5, f"Q{i+1}. {d['question'][:50]}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   Type: {type_text}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   Your answer: {d['user_answer'][:40]}", 0, 1, 'L')
         if q_type == "essay":
-            pdf.cell(0, 5, f"   Score: {d['score']:.1f}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
+            pdf.cell(0, 4, f"   Score: {d['score']:.1f}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
         else:
-            pdf.cell(0, 5, f"   Score: {int(d['score'])}/{int(d['max_score'])} ({d['percentage']:.0f}%)", 0, 1, 'L')
-        pdf.ln(3)
+            pdf.cell(0, 4, f"   Score: {int(d['score'])}/{int(d['max_score'])}", 0, 1, 'L')
+        pdf.ln(2)
     
-    pdf.set_y(-30)
+    pdf.set_y(-25)
     pdf.set_font_size(8)
-    pdf.cell(0, 10, "@zakros_onlinebot", 0, 0, 'C')
+    pdf.cell(0, 8, "@zakros_onlinebot", 0, 0, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
-    pdf.output(path)
-    return path
+    try:
+        pdf.output(path)
+        return path
+    except Exception as e:
+        print(f"PDF error: {e}")
+        return None
 
 # ========== 2. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
@@ -292,7 +289,7 @@ def finish_exam(user_id):
             details.append({
                 "type": "essay",
                 "question": q["text"],
-                "user_answer": user_ans,
+                "user_answer": user_ans[:100],
                 "correct_answer": correct,
                 "score": essay_score,
                 "max_score": 1.0,
@@ -314,12 +311,20 @@ def finish_exam(user_id):
     percentage = (score / total) * 100
     save_result(data["exam_id"], user_id, score, total, percentage, details)
     
-    pdf_path = generate_certificate(user_id, data["title"], score, total, percentage, details)
-    
+    # إرسال النتيجة أولاً
     bot.send_message(user_id, f"🎉 انتهى الاختبار!\nنتيجتك: {score:.1f}/{total} ({percentage:.1f}%)")
-    with open(pdf_path, 'rb') as f:
-        bot.send_document(user_id, f, caption="📜 شهادتك", visible_file_name="certificate.pdf")
-    os.unlink(pdf_path)
+    
+    # إنشاء وإرسال الشهادة
+    pdf_path = generate_certificate(user_id, data["title"], score, total, percentage, details)
+    if pdf_path and os.path.exists(pdf_path):
+        try:
+            with open(pdf_path, 'rb') as f:
+                bot.send_document(user_id, f, caption="📜 شهادتك", visible_file_name="certificate.pdf")
+            os.unlink(pdf_path)
+        except Exception as e:
+            bot.send_message(user_id, f"❌ حدث خطأ أثناء إرسال الشهادة: {str(e)[:100]}")
+    else:
+        bot.send_message(user_id, "❌ حدث خطأ أثناء إنشاء الشهادة.")
 
 # ========== 3. إنشاء اختبار ==========
 temp_exam = {}
@@ -440,7 +445,6 @@ def admin_all_exams(call):
         return
     txt = "📋 قائمة جميع الاختبارات التي أنشأتها:\n\n"
     for eid, title, code, created_at in exams:
-        # حساب عدد المشاركين في هذا الاختبار
         c.execute("SELECT COUNT(*) FROM results WHERE exam_id=?", (eid,))
         participants = c.fetchone()[0]
         txt += f"• {title}\n   رمز: {code}\n   تاريخ: {created_at[:19]}\n   عدد المشاركين: {participants}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
