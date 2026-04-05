@@ -138,35 +138,82 @@ def calculate_essay_score(user_answer, correct_answer):
     
     return round(final_ratio, 2), final_percentage
 
+def get_grade_message(percentage):
+    if percentage >= 90:
+        return ("ممتاز! 🏆", "أداء رائع، أنت متميز!", (0, 100, 0))
+    elif percentage >= 75:
+        return ("جيد جدًا! 👍", "عمل ممتاز، واصل التميز!", (0, 100, 0))
+    elif percentage >= 60:
+        return ("جيد! 📚", "نتيجة جيدة، يمكنك التحسين!", (255, 165, 0))
+    elif percentage >= 50:
+        return ("مقبول! 📖", "تحتاج إلى مذاكرة أكثر قليلاً", (255, 165, 0))
+    else:
+        return ("حظ أوفر! 💪", "لا تيأس، حاول مرة أخرى بعد المذاكرة", (255, 0, 0))
+
 def generate_certificate(user_id, exam_title, score, total, percentage):
-    """شهادة بسيطة بصفحة واحدة تحتوي على النتيجة الإجمالية فقط"""
+    """شهادة احترافية ملونة"""
     pdf = FPDF()
     pdf.add_page()
     
+    # استخدام الخط العربي
     if FONT_PATH and os.path.exists(FONT_PATH):
         pdf.add_font('Noto', '', FONT_PATH, uni=True)
-        pdf.set_font('Noto', '', 20)
+        font_name = 'Noto'
     else:
-        pdf.set_font("Helvetica", "", 20)
+        font_name = 'Helvetica'
     
-    # العنوان
-    pdf.cell(0, 30, "Certificate of Completion", 0, 1, 'C')
-    pdf.ln(10)
+    # عنوان الشهادة
+    pdf.set_font(font_name, '', 24)
+    pdf.set_text_color(0, 51, 102)  # أزرق غامق
+    pdf.cell(0, 25, "شهادة إتمام الاختبار", 0, 1, 'C')
+    pdf.ln(5)
     
-    pdf.set_font_size(14)
-    pdf.cell(0, 12, f"Student ID: {user_id}", 0, 1, 'C')
-    pdf.cell(0, 12, f"Exam: {exam_title}", 0, 1, 'C')
-    pdf.ln(10)
+    # خط فاصل
+    pdf.set_draw_color(0, 102, 204)
+    pdf.line(30, 45, 180, 45)
     
-    # النتيجة
-    pdf.set_font_size(16)
-    pdf.cell(0, 15, f"Final Score: {score:.1f} / {total} ({percentage:.1f}%)", 0, 1, 'C')
+    # معلومات الطالب والاختبار
+    pdf.set_font(font_name, '', 14)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 12, f"الطالب/الطالبة رقم: {user_id}", 0, 1, 'C')
+    pdf.cell(0, 12, f"الاختبار: {exam_title}", 0, 1, 'C')
+    pdf.cell(0, 12, f"التاريخ: {datetime.now().strftime('%Y/%m/%d')}", 0, 1, 'C')
+    pdf.ln(8)
+    
+    # مربع النتيجة
+    grade_msg, advice, color = get_grade_message(percentage)
+    
+    # خلفية مربع النتيجة
+    pdf.set_fill_color(240, 248, 255)  # أزرق فاتح جداً
+    pdf.rect(40, 105, 130, 50, 'F')
+    pdf.set_draw_color(0, 102, 204)
+    pdf.rect(40, 105, 130, 50)
+    
+    # النتيجة داخل المربع
+    pdf.set_font(font_name, 'B', 18)
+    pdf.set_text_color(color[0], color[1], color[2])
+    pdf.set_xy(45, 112)
+    pdf.cell(120, 12, f"{score:.1f} / {total}", 0, 1, 'C')
+    pdf.set_font(font_name, '', 14)
+    pdf.set_xy(45, 128)
+    pdf.cell(120, 12, f"({percentage:.1f}%)", 0, 1, 'C')
+    
     pdf.ln(20)
     
+    # عبارة تحفيزية
+    pdf.set_font(font_name, '', 16)
+    pdf.set_text_color(color[0], color[1], color[2])
+    pdf.cell(0, 12, grade_msg, 0, 1, 'C')
+    pdf.set_font(font_name, '', 12)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 10, advice, 0, 1, 'C')
+    pdf.ln(15)
+    
     # حقوق البوت
-    pdf.set_font_size(10)
-    pdf.set_y(-30)
-    pdf.cell(0, 10, "@ZeQuiz_Bot", 0, 0, 'C')
+    pdf.set_font(font_name, '', 10)
+    pdf.set_text_color(128, 128, 128)
+    pdf.set_y(-25)
+    pdf.cell(0, 8, "@ZeQuiz_Bot", 0, 0, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
@@ -292,7 +339,6 @@ def answer_callback(call):
     bot.answer_callback_query(call.id)
     bot.delete_message(user_id, call.message.message_id)
     
-    # إرسال التصحيح الفوري
     bot.send_message(user_id, f"📊 تصحيح السؤال {idx+1}: {result_text}\nالنتيجة: {score}/{1} ({percentage:.0f}%)")
     
     send_question(user_id)
@@ -313,7 +359,6 @@ def process_essay(message, user_id):
     data["scores"].append({"score": essay_score, "percentage": essay_percentage})
     data["index"] += 1
     
-    # إرسال التصحيح الفوري
     bot.send_message(user_id, f"📊 تصحيح السؤال {idx+1}:\nالنتيجة: {essay_score:.1f}/{1} ({essay_percentage:.0f}%)\nالإجابة الصحيحة: {correct}")
     
     send_question(user_id)
@@ -327,7 +372,6 @@ def finish_exam(user_id):
     total_score = sum(s["score"] for s in data["scores"])
     percentage = (total_score / total) * 100
     
-    # حفظ النتيجة
     details = []
     for i, (q, user_ans, correct, score_info) in enumerate(zip(data["questions"], data["user_ans"], data["answers"], data["scores"])):
         details.append({
@@ -342,18 +386,33 @@ def finish_exam(user_id):
     
     save_result(data["exam_id"], user_id, total_score, total, percentage, details)
     
-    # إرسال النتيجة النهائية
-    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nالنتيجة النهائية: {total_score:.1f}/{total} ({percentage:.1f}%)")
+    # النتيجة النهائية
+    grade_msg, advice, _ = get_grade_message(percentage)
+    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nالنتيجة النهائية: {total_score:.1f}/{total} ({percentage:.1f}%)\n\n{grade_msg}\n{advice}")
     
-    # إنشاء وإرسال الشهادة (بدون تفاصيل الأسئلة)
+    # إنشاء الشهادة
     try:
         pdf_path = generate_certificate(user_id, data["title"], total_score, total, percentage)
         if pdf_path and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
                 bot.send_document(user_id, f, caption="📜 شهادتك - @ZeQuiz_Bot", visible_file_name="certificate.pdf")
             os.unlink(pdf_path)
+            
+            # زر مشاركة النتيجة
+            share_markup = InlineKeyboardMarkup()
+            share_markup.add(InlineKeyboardButton("📢 شارك نتيجتك", callback_data=f"share_result_{user_id}_{int(percentage)}"))
+            bot.send_message(user_id, "🎉 هل تريد مشاركة نتيجتك مع أصدقائك؟", reply_markup=share_markup)
     except Exception as e:
         bot.send_message(user_id, f"❌ حدث خطأ أثناء إنشاء الشهادة: {str(e)[:100]}")
+
+# زر مشاركة النتيجة
+@bot.callback_query_handler(func=lambda call: call.data.startswith("share_result_"))
+def share_result(call):
+    parts = call.data.split("_")
+    user_id = int(parts[2])
+    percentage = parts[3]
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.message.chat.id, f"🎉 حصلت على نتيجة {percentage}% في اختبار @ZeQuiz_Bot!\n\nشاركها مع أصدقائك: https://t.me/{bot.get_me().username}")
 
 # ========== 4. إنشاء اختبار (يستهلك نقطة) ==========
 temp_exam = {}
