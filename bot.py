@@ -108,7 +108,6 @@ def get_user(user_id):
     c.execute("SELECT points, total_shares FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
     if not row:
-        # كل مستخدم جديد يبدأ بنقطتين مجانيتين
         c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 2, 0))
         conn.commit()
         return {"points": 2, "total_shares": 0}
@@ -127,9 +126,17 @@ def add_share(user_id):
     conn.commit()
 
 def add_referral(referrer_id, referred_id):
-    c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?,?,?)", (referrer_id, referred_id, datetime.now().isoformat()))
+    # التحقق مما إذا كان المستخدم المُحال قد سجل من قبل عبر رابط إحالة
+    c.execute("SELECT * FROM referrals WHERE referred_id=?", (referred_id,))
+    existing = c.fetchone()
+    if existing:
+        return False
+    
+    c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?,?,?)", 
+              (referrer_id, referred_id, datetime.now().isoformat()))
     update_points(referrer_id, 0.25)
     conn.commit()
+    return True
 
 def calculate_essay_score(user_answer, correct_answer):
     user_clean = user_answer.lower().strip()
@@ -173,17 +180,14 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     else:
         pdf.set_font("Helvetica", "", 20)
     
-    # عنوان الشهادة
     pdf.set_text_color(0, 51, 102)
     title_text = reshape_arabic("شهادة إتمام الاختبار")
     pdf.cell(0, 25, title_text, 0, 1, 'C')
     pdf.ln(5)
     
-    # خط فاصل
     pdf.set_draw_color(0, 102, 204)
     pdf.line(30, 45, 180, 45)
     
-    # معلومات الطالب والاختبار
     if FONT_PATH:
         pdf.set_font('Noto', '', 12)
     else:
@@ -200,7 +204,6 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.cell(0, 12, date_text, 0, 1, 'C')
     pdf.ln(8)
     
-    # مربع النتيجة
     grade_msg, advice, color = get_grade_message(percentage)
     
     pdf.set_fill_color(240, 248, 255)
@@ -266,12 +269,17 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
 def start(message):
     user_id = message.chat.id
     user = get_user(user_id)
+    
+    # معالجة الإحالة (مرة واحدة فقط لكل مستخدم)
     if len(message.text.split()) > 1:
         ref = message.text.split()[1]
         if ref.isdigit() and int(ref) != user_id:
-            add_referral(int(ref), user_id)
-            bot.send_message(user_id, f"✅ تم تفعيل الإحالة! حصل الداعم على 0.25 نقطة.")
-            bot.send_message(int(ref), f"🎉 قام مستخدم جديد بالتسجيل عبر رابطك! تم إضافة 0.25 نقطة إلى رصيدك.")
+            success = add_referral(int(ref), user_id)
+            if success:
+                bot.send_message(user_id, "✅ تم تفعيل الإحالة! حصل الداعم على 0.25 نقطة.")
+                bot.send_message(int(ref), "🎉 قام مستخدم جديد بالتسجيل عبر رابطك! تم إضافة 0.25 نقطة إلى رصيدك.")
+            else:
+                bot.send_message(user_id, "ℹ️ تم تفعيل حسابك مسبقاً، لا يمكن إضافة نقاط إحالة مرة أخرى.")
     
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📝 دخول إلى اختبار", callback_data="enter_exam"))
@@ -466,7 +474,7 @@ def share_result(call):
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, f"🎉 حصلت على نتيجة {percentage}% في اختبار @ZeQuiz_Bot!\n\nشاركها مع أصدقائك: https://t.me/{bot.get_me().username}")
 
-# ========== 4. إنشاء اختبار (يستهلك نقطة واحدة) ==========
+# ========== 4. إنشاء اختبار ==========
 temp_exam = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_exam")
