@@ -22,11 +22,9 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. تحميل خطوط متعددة ==========
-# خط للغة العربية
+# ========== 1. تحميل الخطوط ==========
 AR_FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
 AR_FONT_PATH = "NotoSansArabic-Regular.ttf"
-# خط للغات الأخرى (لاتيني)
 LATIN_FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip"
 LATIN_FONT_PATH = "DejaVuSans.ttf"
 
@@ -53,7 +51,6 @@ if not os.path.exists(LATIN_FONT_PATH):
         print(f"Latin font download failed: {e}")
 
 def reshape_arabic(text):
-    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
     if any('\u0600' <= c <= '\u06FF' for c in text):
         reshaped = arabic_reshaper.reshape(text)
         return get_display(reshaped)
@@ -63,10 +60,8 @@ def reshape_arabic(text):
 class PDF(FPDF):
     def __init__(self):
         super().__init__()
-        # تسجيل الخط العربي
         if os.path.exists(AR_FONT_PATH):
             self.add_font('NotoArabic', '', AR_FONT_PATH, uni=True)
-        # تسجيل الخط اللاتيني
         if os.path.exists(LATIN_FONT_PATH):
             self.add_font('DejaVu', '', LATIN_FONT_PATH, uni=True)
         self.add_page()
@@ -85,14 +80,13 @@ class PDF(FPDF):
         self.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
     
     def add_paragraph(self, title, text, color=(0,0,0), is_arabic=False):
-        # اختيار الخط المناسب
-        if is_arabic:
+        if is_arabic and os.path.exists(AR_FONT_PATH):
             self.set_font('NotoArabic', '', 12)
         else:
             self.set_font('DejaVu', '', 12)
         self.set_text_color(color[0], color[1], color[2])
         self.cell(0, 8, title, ln=1)
-        if is_arabic:
+        if is_arabic and os.path.exists(AR_FONT_PATH):
             self.set_font('NotoArabic', '', 11)
             text = reshape_arabic(text)
         else:
@@ -101,7 +95,7 @@ class PDF(FPDF):
         self.multi_cell(0, 7, text)
         self.ln(6)
 
-# ========== 3. قاعدة البيانات (نفس السابق) ==========
+# ========== 3. قاعدة البيانات ==========
 DB_NAME = "bot_data.db"
 
 def get_db_connection():
@@ -205,17 +199,32 @@ def update_progress(user_id, status_msg, stage, percent, details=""):
     bot.edit_message_text(text, user_id, status_msg.message_id)
 
 def split_into_sections(text, max_sentences=3):
-    sentences = re.split(r'(?<=[.!?؟])\s+', text)
-    sections = []
-    current = []
-    for sent in sentences:
-        current.append(sent)
-        if len(current) >= max_sentences:
-            sections.append(" ".join(current))
+    if len(text) > 10000:
+        parts = text.split('\n\n')
+        sections = []
+        for part in parts:
+            sentences = re.split(r'(?<=[.!?؟])\s+', part)
             current = []
-    if current:
-        sections.append(" ".join(current))
-    return sections if sections else [text[:500]]
+            for sent in sentences:
+                current.append(sent)
+                if len(current) >= max_sentences:
+                    sections.append(" ".join(current))
+                    current = []
+            if current:
+                sections.append(" ".join(current))
+        return sections if sections else [text[:500]]
+    else:
+        sentences = re.split(r'(?<=[.!?؟])\s+', text)
+        sections = []
+        current = []
+        for sent in sentences:
+            current.append(sent)
+            if len(current) >= max_sentences:
+                sections.append(" ".join(current))
+                current = []
+        if current:
+            sections.append(" ".join(current))
+        return sections if sections else [text[:500]]
 
 def translate_section(section, target_lang, user_id, status_msg, idx, total):
     percent = int((idx / total) * 100)
@@ -241,20 +250,17 @@ def process_translation(user_id, target_lang, target_name):
         total_sections = len(sections)
         update_progress(user_id, status_msg, "✅ تم التقسيم", 20, f"عدد الأقسام: {total_sections}")
         
-        # ترجمة كل قسم
         translated_sections = []
         for i, sec in enumerate(sections, 1):
             translated = translate_section(sec, target_lang, user_id, status_msg, i, total_sections)
             translated_sections.append(translated)
             time.sleep(0.3)
         
-        # إنشاء PDF
         update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
         pdf = PDF()
         for i, (orig, trans) in enumerate(zip(sections, translated_sections), 1):
             if i > 1:
                 pdf.add_page()
-            # تحديد ما إذا كان النص عربياً (للاختيار الخط المناسب)
             orig_is_arabic = any('\u0600' <= c <= '\u06FF' for c in orig)
             trans_is_arabic = any('\u0600' <= c <= '\u06FF' for c in trans)
             pdf.add_paragraph(f"Part {i} - Original Text / النص الأصلي", orig, color=(0, 0, 150), is_arabic=orig_is_arabic)
@@ -275,7 +281,7 @@ def process_translation(user_id, target_lang, target_name):
     except Exception as e:
         bot.edit_message_text(f"❌ فشل: {str(e)[:200]}", user_id, status_msg.message_id)
 
-# ========== 5. أوامر البوت (نفس السابق) ==========
+# ========== 5. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
@@ -357,30 +363,54 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
 
-# ========== 6. معالجة الملفات والنصوص ==========
+# ========== 6. معالجة الملفات والنصوص (محسنة) ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
     if get_user(user_id)["points"] <= 0:
         bot.reply_to(message, "❌ رصيدك لا يكفي. استخدم /share")
         return
-    if not message.document.file_name.endswith('.txt'):
+    
+    file_name = message.document.file_name
+    if not file_name.endswith('.txt'):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط")
         return
+    
+    status_msg = bot.send_message(user_id, "📥 جاري تحميل الملف...")
+    
     try:
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
-        text = downloaded.decode('utf-8')
-        if len(text.strip()) < 5:
-            bot.reply_to(message, "❌ النص قصير جداً")
+        
+        text = None
+        for encoding in ['utf-8', 'cp1256', 'iso-8859-6', 'latin-1']:
+            try:
+                text = downloaded.decode(encoding)
+                break
+            except:
+                continue
+        
+        if text is None:
+            bot.edit_message_text("❌ لا يمكن قراءة الملف. تأكد من أنه نصي وبترميز UTF-8.", user_id, status_msg.message_id)
             return
-        user_sessions[user_id] = {"text": text, "filename": message.document.file_name}
+        
+        if len(text.strip()) < 5:
+            bot.edit_message_text("❌ الملف فارغ أو النص قصير جداً.", user_id, status_msg.message_id)
+            return
+        
+        if len(text) > 50000:
+            bot.edit_message_text("⚠️ الملف كبير جداً (>50,000 حرف). قد تستغرق المعالجة وقتاً طويلاً.", user_id, status_msg.message_id)
+        
+        user_sessions[user_id] = {"text": text, "filename": file_name}
+        bot.delete_message(user_id, status_msg.message_id)
+        
         markup = InlineKeyboardMarkup()
         for code, name in LANGUAGES.items():
             markup.add(InlineKeyboardButton(name, callback_data=code))
         bot.send_message(user_id, "✨ اختر اللغة:", reply_markup=markup)
+        
     except Exception as e:
-        bot.reply_to(message, f"❌ خطأ: {str(e)[:100]}")
+        bot.edit_message_text(f"❌ فشل تحميل الملف: {str(e)[:100]}", user_id, status_msg.message_id)
 
 @bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
 def handle_text(message):
