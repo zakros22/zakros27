@@ -12,6 +12,8 @@ import requests
 import zipfile
 import io
 from fpdf import FPDF
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -20,58 +22,86 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. تحميل خط DejaVuSans (يدعم جميع اللغات) ==========
-FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip"
-FONT_PATH = "DejaVuSans.ttf"
+# ========== 1. تحميل خطوط متعددة ==========
+# خط للغة العربية
+AR_FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
+AR_FONT_PATH = "NotoSansArabic-Regular.ttf"
+# خط للغات الأخرى (لاتيني)
+LATIN_FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip"
+LATIN_FONT_PATH = "DejaVuSans.ttf"
 
-if not os.path.exists(FONT_PATH):
+if not os.path.exists(AR_FONT_PATH):
     try:
-        print("Downloading font...")
-        r = requests.get(FONT_URL, timeout=30)
+        print("Downloading Arabic font...")
+        r = requests.get(AR_FONT_URL, timeout=30)
+        with open(AR_FONT_PATH, "wb") as f:
+            f.write(r.content)
+        print("Arabic font installed.")
+    except Exception as e:
+        print(f"Arabic font download failed: {e}")
+
+if not os.path.exists(LATIN_FONT_PATH):
+    try:
+        print("Downloading Latin font...")
+        r = requests.get(LATIN_FONT_URL, timeout=30)
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             with z.open("dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf") as f:
-                with open(FONT_PATH, "wb") as out:
+                with open(LATIN_FONT_PATH, "wb") as out:
                     out.write(f.read())
-        print("Font installed successfully.")
+        print("Latin font installed.")
     except Exception as e:
-        print(f"Font download failed: {e}")
-        FONT_PATH = None
+        print(f"Latin font download failed: {e}")
+
+def reshape_arabic(text):
+    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
+    if any('\u0600' <= c <= '\u06FF' for c in text):
+        reshaped = arabic_reshaper.reshape(text)
+        return get_display(reshaped)
+    return text
 
 # ========== 2. إعدادات PDF ==========
 class PDF(FPDF):
     def __init__(self):
         super().__init__()
-        if FONT_PATH and os.path.exists(FONT_PATH):
-            self.add_font('DejaVu', '', FONT_PATH, uni=True)
-            self.font_name = 'DejaVu'
-        else:
-            self.set_font('Helvetica', '', 12)
-            self.font_name = 'Helvetica'
-        self.add_page()  # فتح صفحة أولى تلقائياً
+        # تسجيل الخط العربي
+        if os.path.exists(AR_FONT_PATH):
+            self.add_font('NotoArabic', '', AR_FONT_PATH, uni=True)
+        # تسجيل الخط اللاتيني
+        if os.path.exists(LATIN_FONT_PATH):
+            self.add_font('DejaVu', '', LATIN_FONT_PATH, uni=True)
+        self.add_page()
     
     def header(self):
         if self.page_no() > 1:
-            self.set_font(self.font_name, '', 9)
+            self.set_font('DejaVu', '', 9)
             self.set_text_color(100, 100, 100)
             self.cell(0, 10, f"Page {self.page_no()}", 0, 0, 'C')
             self.ln(8)
     
     def footer(self):
         self.set_y(-15)
-        self.set_font(self.font_name, '', 8)
+        self.set_font('DejaVu', '', 8)
         self.set_text_color(128, 128, 128)
         self.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
     
-    def add_paragraph(self, title, text, color=(0,0,0)):
-        self.set_font(self.font_name, '', 12)
+    def add_paragraph(self, title, text, color=(0,0,0), is_arabic=False):
+        # اختيار الخط المناسب
+        if is_arabic:
+            self.set_font('NotoArabic', '', 12)
+        else:
+            self.set_font('DejaVu', '', 12)
         self.set_text_color(color[0], color[1], color[2])
         self.cell(0, 8, title, ln=1)
-        self.set_font(self.font_name, '', 11)
+        if is_arabic:
+            self.set_font('NotoArabic', '', 11)
+            text = reshape_arabic(text)
+        else:
+            self.set_font('DejaVu', '', 11)
         self.set_text_color(0, 0, 0)
         self.multi_cell(0, 7, text)
         self.ln(6)
 
-# ========== 3. قاعدة البيانات ==========
+# ========== 3. قاعدة البيانات (نفس السابق) ==========
 DB_NAME = "bot_data.db"
 
 def get_db_connection():
@@ -175,7 +205,6 @@ def update_progress(user_id, status_msg, stage, percent, details=""):
     bot.edit_message_text(text, user_id, status_msg.message_id)
 
 def split_into_sections(text, max_sentences=3):
-    """تقسيم النص إلى أقسام (كل قسم = عدد معين من الجمل)"""
     sentences = re.split(r'(?<=[.!?؟])\s+', text)
     sections = []
     current = []
@@ -221,17 +250,19 @@ def process_translation(user_id, target_lang, target_name):
         
         # إنشاء PDF
         update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
-        pdf = PDF()  # الصفحة الأولى مفتوحة تلقائياً
+        pdf = PDF()
         for i, (orig, trans) in enumerate(zip(sections, translated_sections), 1):
             if i > 1:
                 pdf.add_page()
-            pdf.add_paragraph(f"📖 Part {i} - Original Text / النص الأصلي", orig, color=(0, 0, 150))
-            pdf.add_paragraph(f"🌍 Part {i} - Translated Text / النص المترجم", trans, color=(0, 100, 0))
+            # تحديد ما إذا كان النص عربياً (للاختيار الخط المناسب)
+            orig_is_arabic = any('\u0600' <= c <= '\u06FF' for c in orig)
+            trans_is_arabic = any('\u0600' <= c <= '\u06FF' for c in trans)
+            pdf.add_paragraph(f"Part {i} - Original Text / النص الأصلي", orig, color=(0, 0, 150), is_arabic=orig_is_arabic)
+            pdf.add_paragraph(f"Part {i} - Translated Text / النص المترجم", trans, color=(0, 100, 0), is_arabic=trans_is_arabic)
         
         pdf_path = tempfile.mktemp(suffix='.pdf')
         pdf.output(pdf_path)
         
-        # حفظ النقاط وإرسال الملف
         update_points(user_id, -1)
         new_points = get_user(user_id)["points"]
         update_progress(user_id, status_msg, "📤 جاري إرسال الملف...", 100, "اكتمل!")
@@ -244,7 +275,7 @@ def process_translation(user_id, target_lang, target_name):
     except Exception as e:
         bot.edit_message_text(f"❌ فشل: {str(e)[:200]}", user_id, status_msg.message_id)
 
-# ========== 5. أوامر البوت ==========
+# ========== 5. أوامر البوت (نفس السابق) ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
