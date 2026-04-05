@@ -11,8 +11,6 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-import arabic_reshaper
-from bidi.algorithm import get_display
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -20,25 +18,29 @@ if not BOT_TOKEN:
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# تحميل خط عربي (NotoSansArabic) من الإنترنت إذا لم يكن موجوداً
+# تحميل خط عربي من جوجل (يدعم العربية ولو بشكل بسيط)
+FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
 FONT_PATH = "NotoSansArabic-Regular.ttf"
 if not os.path.exists(FONT_PATH):
     try:
         print("Downloading Arabic font...")
-        url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
-        r = requests.get(url, timeout=30)
+        r = requests.get(FONT_URL, timeout=30)
         with open(FONT_PATH, "wb") as f:
             f.write(r.content)
-        print("Font downloaded successfully.")
+        print("Font downloaded.")
     except:
-        print("Could not download font, will use default fallback.")
+        print("Font download failed, using fallback.")
+        FONT_PATH = None
 
-# تسجيل الخط في reportlab
-try:
-    pdfmetrics.registerFont(TTFont('NotoSansArabic', FONT_PATH))
-    ARABIC_FONT = 'NotoSansArabic'
-except:
-    ARABIC_FONT = 'Helvetica'  # خط احتياطي
+# تسجيل الخط إذا تم تحميله
+if FONT_PATH and os.path.exists(FONT_PATH):
+    try:
+        pdfmetrics.registerFont(TTFont('NotoSansArabic', FONT_PATH))
+        ARABIC_FONT = 'NotoSansArabic'
+    except:
+        ARABIC_FONT = 'Helvetica'
+else:
+    ARABIC_FONT = 'Helvetica'
 
 # اللغات المدعومة
 LANGUAGES = {
@@ -49,12 +51,6 @@ LANGUAGES = {
 }
 
 user_sessions = {}
-
-def reshape_arabic(text):
-    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
-    reshaped = arabic_reshaper.reshape(text)
-    bidi_text = get_display(reshaped)
-    return bidi_text
 
 def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
     translator = GoogleTranslator(source='auto', target=target_lang)
@@ -85,14 +81,13 @@ def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
     return " ".join(translated_parts)
 
 def create_bilingual_pdf(original, translated, output_path):
-    """إنشاء PDF مع نصوص عربية مشكلة بشكل صحيح"""
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
     c.setFont(ARABIC_FONT, 12)
     
     # النص الأصلي
-    c.setFillColorRGB(0, 0, 0.6)  # أزرق
-    c.drawString(50, height - 50, "النص الأصلي:")
+    c.setFillColorRGB(0, 0, 0.6)
+    c.drawString(50, height - 50, "Original Text:")
     c.setFillColorRGB(0, 0, 0)
     y = height - 70
     for line in original.split('\n'):
@@ -100,15 +95,14 @@ def create_bilingual_pdf(original, translated, output_path):
             c.showPage()
             y = height - 50
             c.setFont(ARABIC_FONT, 12)
-        reshaped_line = reshape_arabic(line) if ARABIC_FONT == 'NotoSansArabic' else line
-        c.drawString(50, y, reshaped_line[:100])
+        c.drawString(50, y, line[:100])
         y -= 15
     
     # النص المترجم
     c.showPage()
     c.setFont(ARABIC_FONT, 12)
-    c.setFillColorRGB(0, 0.5, 0)  # أخضر
-    c.drawString(50, height - 50, "النص المترجم:")
+    c.setFillColorRGB(0, 0.5, 0)
+    c.drawString(50, height - 50, "Translated Text:")
     c.setFillColorRGB(0, 0, 0)
     y = height - 70
     for line in translated.split('\n'):
@@ -116,14 +110,13 @@ def create_bilingual_pdf(original, translated, output_path):
             c.showPage()
             y = height - 50
             c.setFont(ARABIC_FONT, 12)
-        reshaped_line = reshape_arabic(line) if ARABIC_FONT == 'NotoSansArabic' else line
-        c.drawString(50, y, reshaped_line[:100])
+        c.drawString(50, y, line[:100])
         y -= 15
     
     # تذييل الحقوق
     c.setFillColorRGB(0.5, 0.5, 0.5)
     c.setFont(ARABIC_FONT, 8)
-    c.drawString(50, 30, "تمت الترجمة بواسطة @zakros_onlinebot")
+    c.drawString(50, 30, "Translation by @zakros_onlinebot")
     c.save()
 
 def process_translation(user_id, target_lang, target_name):
@@ -157,7 +150,7 @@ def process_translation(user_id, target_lang, target_name):
 def start(message):
     bot.send_message(
         message.chat.id,
-        "Send me a .txt file or a text message. I will translate it into the language you choose and send you a beautifully formatted PDF with the original and translated text.\nBot credit: @zakros_onlinebot"
+        "Send me a .txt file or a text message. I will translate it into the language you choose and send you a PDF.\nBot credit: @zakros_onlinebot"
     )
 
 @bot.message_handler(content_types=['document'])
