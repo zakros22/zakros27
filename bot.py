@@ -2,35 +2,30 @@ import os
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import tempfile
-from googletrans import Translator
-import time
+from deep_translator import GoogleTranslator
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN not set")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-translator = Translator()
 
-# اللغات المدعومة (العربية الفصحى، الإنجليزية، الفرنسية، التركية)
+# اللغات المدعومة
 LANGUAGES = {
     "ar": "🇸🇦 العربية (فصحى)",
     "en": "🇬🇧 English",
-    "fr": "🇫🇷 Français",
-    "tr": "🇹🇷 Türkçe"
+    "fr": "🇫🇷 Français"
 }
 
 user_texts = {}
 
-def translate_with_retry(text, dest, retries=3):
-    """إعادة محاولة الترجمة في حالة فشل"""
-    for i in range(retries):
-        try:
-            return translator.translate(text, dest=dest).text
-        except Exception as e:
-            if i == retries - 1:
-                raise e
-            time.sleep(2)
+def translate_text(text, target_lang):
+    """ترجمة النص باستخدام Google Translate (مجاني، بدون مفتاح)"""
+    try:
+        translator = GoogleTranslator(source='auto', target=target_lang)
+        return translator.translate(text)
+    except Exception as e:
+        raise Exception(f"فشل الترجمة: {str(e)}")
 
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -85,10 +80,10 @@ def translate_callback(call):
         return
 
     bot.answer_callback_query(call.id, f"جاري الترجمة إلى {LANGUAGES[target]}...")
-    msg = bot.send_message(user_id, f"⏳ جاري الترجمة... قد تستغرق 5-10 ثوانٍ.")
+    msg = bot.send_message(user_id, "⏳ جاري الترجمة... قد تستغرق 5-10 ثوانٍ.")
 
     try:
-        translated = translate_with_retry(session["text"], target)
+        translated = translate_text(session["text"], target)
 
         base, ext = os.path.splitext(session["filename"])
         new_filename = f"{base}_{target}{ext}"
