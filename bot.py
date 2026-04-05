@@ -9,7 +9,7 @@ import random
 from datetime import datetime
 from fpdf import FPDF
 import difflib
-import time
+import re
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -107,44 +107,61 @@ def add_referral(referrer_id, referred_id):
     conn.commit()
 
 def calculate_essay_score(user_answer, correct_answer):
+    """حساب نسبة التطابق بين إجابة الطالب والإجابة النموذجية"""
     user_clean = user_answer.lower().strip()
     correct_clean = correct_answer.lower().strip()
+    
     if user_clean == correct_clean:
-        return 1.0
-    ratio = difflib.SequenceMatcher(None, user_clean, correct_clean).ratio()
-    return round(ratio, 2)
+        return 1.0, 100.0
+    
+    # حساب عدد الكلمات المتطابقة
+    user_words = set(re.findall(r'\w+', user_clean))
+    correct_words = set(re.findall(r'\w+', correct_clean))
+    if correct_words:
+        word_match = len(user_words.intersection(correct_words)) / len(correct_words)
+    else:
+        word_match = 0
+    
+    # حساب عدد الحروف المتطابقة
+    char_match = difflib.SequenceMatcher(None, user_clean, correct_clean).ratio()
+    
+    # النسبة النهائية (70% كلمات + 30% حروف)
+    final_ratio = (word_match * 0.7) + (char_match * 0.3)
+    final_percentage = round(final_ratio * 100, 1)
+    
+    return round(final_ratio, 2), final_percentage
 
 def generate_certificate(user_id, exam_title, score, total, percentage, details):
-    """إنشاء شهادة PDF بسيطة"""
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_font("Helvetica", "B", 18)
     pdf.cell(0, 15, "Certificate of Completion", 0, 1, 'C')
     pdf.set_font("Helvetica", "", 12)
     pdf.cell(0, 10, f"Student ID: {user_id}", 0, 1, 'C')
     pdf.cell(0, 10, f"Exam: {exam_title}", 0, 1, 'C')
-    pdf.cell(0, 10, f"Score: {score:.1f}/{total} ({percentage:.1f}%)", 0, 1, 'C')
+    pdf.cell(0, 10, f"Total Score: {score:.1f}/{total} ({percentage:.1f}%)", 0, 1, 'C')
     pdf.ln(5)
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 8, "Results:", 0, 1, 'L')
+    pdf.cell(0, 8, "Detailed Results:", 0, 1, 'L')
     pdf.set_font("Helvetica", "", 9)
     
-    for i, d in enumerate(details[:20]):  # حد أقصى 20 سؤال في الشهادة
+    for i, d in enumerate(details[:20]):
         q_type = d.get("type", "unknown")
         if q_type == "essay":
-            type_text = "Essay"
+            type_text = "سؤال وجواب"
         elif q_type == "mcq":
-            type_text = "MCQ"
+            type_text = "اختيار من متعدد"
         else:
-            type_text = "True/False"
+            type_text = "صح/خطأ"
         
         pdf.cell(0, 5, f"Q{i+1}. {d['question'][:50]}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   Type: {type_text}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   Your answer: {d['user_answer'][:40]}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   النوع: {type_text}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   إجابتك: {d['user_answer'][:40]}", 0, 1, 'L')
+        pdf.cell(0, 4, f"   الإجابة الصحيحة: {d['correct_answer'][:40]}", 0, 1, 'L')
         if q_type == "essay":
-            pdf.cell(0, 4, f"   Score: {d['score']:.1f}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
+            pdf.cell(0, 4, f"   النتيجة: {d['score']:.1f}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
         else:
-            pdf.cell(0, 4, f"   Score: {int(d['score'])}/{int(d['max_score'])}", 0, 1, 'L')
+            pdf.cell(0, 4, f"   النتيجة: {int(d['score'])}/{int(d['max_score'])} ({d['percentage']:.0f}%)", 0, 1, 'L')
         pdf.ln(2)
     
     pdf.set_y(-25)
@@ -152,12 +169,8 @@ def generate_certificate(user_id, exam_title, score, total, percentage, details)
     pdf.cell(0, 8, "@zakros_onlinebot", 0, 0, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
-    try:
-        pdf.output(path)
-        return path
-    except Exception as e:
-        print(f"PDF error: {e}")
-        return None
+    pdf.output(path)
+    return path
 
 # ========== 2. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
@@ -180,7 +193,8 @@ def start(message):
     bot.send_message(user_id,
         f"🎓 بوت الاختبارات\n\n"
         f"• رصيدك: {student['points']} نقطة\n"
-        f"• كل اختبار يستهلك نقطة.\n"
+        f"• إنشاء اختبار جديد يستهلك نقطة واحدة.\n"
+        f"• دخول الاختبار مجاني.\n"
         f"• احصل على نقاط مجانية عبر مشاركة الرابط (كل 4 مشاركات = نقطة).\n"
         f"رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\n"
         f"📌 @zakros_onlinebot",
@@ -195,11 +209,7 @@ def share_link(call):
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
 def enter_exam(call):
     user_id = call.message.chat.id
-    student = get_student(user_id)
-    if student["points"] <= 0:
-        bot.answer_callback_query(call.id, "ليس لديك نقاط. شارك الرابط لتحصل على نقاط.", show_alert=True)
-        return
-    
+    # دخول الاختبار مجاني، لا نستهلك نقاط
     bot.send_message(user_id, "🔗 أرسل رمز الاختبار (مثال: ABC123):")
     bot.register_next_step_handler(call.message, process_exam_code)
 
@@ -211,7 +221,7 @@ def process_exam_code(message):
         bot.send_message(user_id, "❌ رمز الاختبار غير صحيح.")
         return
     
-    update_points(user_id, -1)
+    # دخول الاختبار مجاني
     start_exam(user_id, exam)
 
 def start_exam(user_id, exam):
@@ -282,9 +292,10 @@ def finish_exam(user_id):
     total = len(data["questions"])
     score = 0.0
     details = []
+    
     for i, (q, user_ans, correct) in enumerate(zip(data["questions"], data["user_ans"], data["answers"])):
         if q["type"] == "essay":
-            essay_score = calculate_essay_score(user_ans, correct)
+            essay_score, essay_percentage = calculate_essay_score(user_ans, correct)
             score += essay_score
             details.append({
                 "type": "essay",
@@ -293,13 +304,25 @@ def finish_exam(user_id):
                 "correct_answer": correct,
                 "score": essay_score,
                 "max_score": 1.0,
-                "percentage": essay_score * 100
+                "percentage": essay_percentage
             })
-        else:
+        elif q["type"] == "mcq":
             is_correct = (user_ans == correct)
             score += 1 if is_correct else 0
             details.append({
-                "type": q["type"],
+                "type": "mcq",
+                "question": q["text"],
+                "user_answer": user_ans,
+                "correct_answer": correct,
+                "score": 1 if is_correct else 0,
+                "max_score": 1,
+                "percentage": 100 if is_correct else 0
+            })
+        else:  # truefalse
+            is_correct = (user_ans == correct)
+            score += 1 if is_correct else 0
+            details.append({
+                "type": "truefalse",
                 "question": q["text"],
                 "user_answer": user_ans,
                 "correct_answer": correct,
@@ -311,22 +334,20 @@ def finish_exam(user_id):
     percentage = (score / total) * 100
     save_result(data["exam_id"], user_id, score, total, percentage, details)
     
-    # إرسال النتيجة أولاً
+    # إرسال النتيجة
     bot.send_message(user_id, f"🎉 انتهى الاختبار!\nنتيجتك: {score:.1f}/{total} ({percentage:.1f}%)")
     
     # إنشاء وإرسال الشهادة
-    pdf_path = generate_certificate(user_id, data["title"], score, total, percentage, details)
-    if pdf_path and os.path.exists(pdf_path):
-        try:
+    try:
+        pdf_path = generate_certificate(user_id, data["title"], score, total, percentage, details)
+        if pdf_path and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
                 bot.send_document(user_id, f, caption="📜 شهادتك", visible_file_name="certificate.pdf")
             os.unlink(pdf_path)
-        except Exception as e:
-            bot.send_message(user_id, f"❌ حدث خطأ أثناء إرسال الشهادة: {str(e)[:100]}")
-    else:
-        bot.send_message(user_id, "❌ حدث خطأ أثناء إنشاء الشهادة.")
+    except Exception as e:
+        bot.send_message(user_id, f"❌ حدث خطأ أثناء إنشاء الشهادة: {str(e)[:100]}")
 
-# ========== 3. إنشاء اختبار ==========
+# ========== 3. إنشاء اختبار (يستهلك نقطة) ==========
 temp_exam = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_exam")
@@ -334,65 +355,78 @@ def create_exam_start(call):
     if call.message.chat.id != OWNER_ID:
         bot.answer_callback_query(call.id, "غير مصرح")
         return
-    temp_exam[OWNER_ID] = {"step": "title", "questions": [], "answers": []}
-    bot.send_message(OWNER_ID, "📌 أرسل عنوان الاختبار:")
+    
+    user_id = call.message.chat.id
+    student = get_student(user_id)
+    if student["points"] <= 0:
+        bot.answer_callback_query(call.id, "ليس لديك نقاط كافية لإنشاء اختبار. شارك الرابط لتحصل على نقاط.", show_alert=True)
+        return
+    
+    temp_exam[user_id] = {"step": "title", "questions": [], "answers": []}
+    bot.send_message(user_id, "📌 أرسل عنوان الاختبار:")
     bot.register_next_step_handler(call.message, process_title)
 
 def process_title(message):
-    temp_exam[OWNER_ID]["title"] = message.text.strip()
-    temp_exam[OWNER_ID]["step"] = "question"
-    bot.send_message(OWNER_ID, "➕ أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (mcq/truefalse/text):\nمثال:\nما عاصمة فرنسا؟\ntext")
+    user_id = message.chat.id
+    temp_exam[user_id]["title"] = message.text.strip()
+    temp_exam[user_id]["step"] = "question"
+    bot.send_message(user_id, "➕ أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (mcq/truefalse/text):\nمثال:\nما عاصمة فرنسا؟\ntext")
 
-@bot.message_handler(func=lambda m: m.chat.id == OWNER_ID and temp_exam.get(OWNER_ID, {}).get("step") == "question")
+@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "question")
 def process_question(message):
+    user_id = message.chat.id
     lines = message.text.strip().split('\n')
     if len(lines) < 2:
-        bot.send_message(OWNER_ID, "❌ اكتب السؤال ثم النوع في سطر جديد.")
+        bot.send_message(user_id, "❌ اكتب السؤال ثم النوع في سطر جديد.")
         return
     q_text = lines[0]
     q_type = lines[1].lower()
     if q_type not in ["text", "mcq", "truefalse"]:
-        bot.send_message(OWNER_ID, "❌ النوع غير صالح. اختر: text, mcq, truefalse")
+        bot.send_message(user_id, "❌ النوع غير صالح. اختر: text, mcq, truefalse")
         return
-    temp_exam[OWNER_ID]["current_q"] = {"text": q_text, "type": q_type}
+    temp_exam[user_id]["current_q"] = {"text": q_text, "type": q_type}
     if q_type == "mcq":
-        temp_exam[OWNER_ID]["step"] = "mcq_options"
-        bot.send_message(OWNER_ID, "📋 أرسل الخيارات مفصولة بفواصل (مثال: باريس, لندن, برلين, مدريد):")
+        temp_exam[user_id]["step"] = "mcq_options"
+        bot.send_message(user_id, "📋 أرسل الخيارات مفصولة بفواصل (مثال: باريس, لندن, برلين, مدريد):")
     elif q_type == "truefalse":
-        temp_exam[OWNER_ID]["step"] = "truefalse_answer"
-        bot.send_message(OWNER_ID, "✅ أرسل الإجابة الصحيحة (صح أو خطأ):")
+        temp_exam[user_id]["step"] = "truefalse_answer"
+        bot.send_message(user_id, "✅ أرسل الإجابة الصحيحة (صح أو خطأ):")
     else:
-        temp_exam[OWNER_ID]["step"] = "essay_answer"
-        bot.send_message(OWNER_ID, "✍️ أرسل الإجابة النموذجية:")
+        temp_exam[user_id]["step"] = "essay_answer"
+        bot.send_message(user_id, "✍️ أرسل الإجابة النموذجية:")
 
-@bot.message_handler(func=lambda m: m.chat.id == OWNER_ID and temp_exam.get(OWNER_ID, {}).get("step") == "mcq_options")
+@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "mcq_options")
 def process_mcq_options(message):
+    user_id = message.chat.id
     opts = [opt.strip() for opt in message.text.split(',')]
-    temp_exam[OWNER_ID]["current_q"]["options"] = opts
-    temp_exam[OWNER_ID]["step"] = "mcq_answer"
-    bot.send_message(OWNER_ID, f"الخيارات: {', '.join(opts)}\nأرسل الإجابة الصحيحة (نص الخيار بالضبط):")
+    temp_exam[user_id]["current_q"]["options"] = opts
+    temp_exam[user_id]["step"] = "mcq_answer"
+    bot.send_message(user_id, f"الخيارات: {', '.join(opts)}\nأرسل الإجابة الصحيحة (نص الخيار بالضبط):")
 
-@bot.message_handler(func=lambda m: m.chat.id == OWNER_ID and temp_exam.get(OWNER_ID, {}).get("step") == "mcq_answer")
+@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "mcq_answer")
 def process_mcq_answer(message):
-    temp_exam[OWNER_ID]["current_q"]["answer"] = message.text.strip()
-    save_question(OWNER_ID)
-    ask_next(OWNER_ID)
+    user_id = message.chat.id
+    temp_exam[user_id]["current_q"]["answer"] = message.text.strip()
+    save_question(user_id)
+    ask_next(user_id)
 
-@bot.message_handler(func=lambda m: m.chat.id == OWNER_ID and temp_exam.get(OWNER_ID, {}).get("step") == "truefalse_answer")
+@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "truefalse_answer")
 def process_truefalse_answer(message):
+    user_id = message.chat.id
     ans = message.text.strip()
     if ans not in ["صح", "خطأ"]:
-        bot.send_message(OWNER_ID, "❌ أرسل 'صح' أو 'خطأ'")
+        bot.send_message(user_id, "❌ أرسل 'صح' أو 'خطأ'")
         return
-    temp_exam[OWNER_ID]["current_q"]["answer"] = ans
-    save_question(OWNER_ID)
-    ask_next(OWNER_ID)
+    temp_exam[user_id]["current_q"]["answer"] = ans
+    save_question(user_id)
+    ask_next(user_id)
 
-@bot.message_handler(func=lambda m: m.chat.id == OWNER_ID and temp_exam.get(OWNER_ID, {}).get("step") == "essay_answer")
+@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "essay_answer")
 def process_essay_answer(message):
-    temp_exam[OWNER_ID]["current_q"]["answer"] = message.text.strip()
-    save_question(OWNER_ID)
-    ask_next(OWNER_ID)
+    user_id = message.chat.id
+    temp_exam[user_id]["current_q"]["answer"] = message.text.strip()
+    save_question(user_id)
+    ask_next(user_id)
 
 def save_question(uid):
     q = temp_exam[uid]["current_q"]
@@ -407,19 +441,32 @@ def ask_next(uid):
 
 @bot.callback_query_handler(func=lambda call: call.data == "next_q")
 def next_question(call):
-    if call.message.chat.id != OWNER_ID:
+    user_id = call.message.chat.id
+    if user_id not in temp_exam:
         return
-    temp_exam[OWNER_ID]["step"] = "question"
-    bot.edit_message_text("➕ أضف السؤال التالي (سؤال ثم نوع في سطر جديد):", OWNER_ID, call.message.message_id)
+    temp_exam[user_id]["step"] = "question"
+    bot.edit_message_text("➕ أضف السؤال التالي (سؤال ثم نوع في سطر جديد):", user_id, call.message.message_id)
     bot.register_next_step_handler(call.message, process_question)
 
 @bot.callback_query_handler(func=lambda call: call.data == "finish_exam")
 def finish_creation(call):
-    if call.message.chat.id != OWNER_ID:
+    user_id = call.message.chat.id
+    if user_id not in temp_exam:
         return
-    data = temp_exam.pop(OWNER_ID)
-    eid, code = add_exam(data["title"], data["questions"], data["answers"], OWNER_ID)
-    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}", OWNER_ID, call.message.message_id)
+    
+    # استهلاك نقطة واحدة لإنشاء الاختبار
+    student = get_student(user_id)
+    if student["points"] <= 0:
+        bot.edit_message_text("❌ ليس لديك نقاط كافية لإنشاء الاختبار.", user_id, call.message.message_id)
+        temp_exam.pop(user_id, None)
+        return
+    
+    update_points(user_id, -1)
+    data = temp_exam.pop(user_id)
+    eid, code = add_exam(data["title"], data["questions"], data["answers"], user_id)
+    new_points = get_student(user_id)["points"]
+    
+    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_points}", user_id, call.message.message_id)
 
 # ========== 4. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
@@ -528,11 +575,7 @@ def handle_exam_link(message):
     if not exam:
         bot.send_message(message.chat.id, "❌ رابط غير صحيح.")
         return
-    student = get_student(message.chat.id)
-    if student["points"] <= 0:
-        bot.send_message(message.chat.id, "❌ ليس لديك نقاط كافية. شارك الرابط لتحصل على نقاط.")
-        return
-    update_points(message.chat.id, -1)
+    # دخول الاختبار مجاني
     start_exam(message.chat.id, exam)
 
 if __name__ == "__main__":
