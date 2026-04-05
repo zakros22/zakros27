@@ -1,2 +1,5 @@
 pyTelegramBotAPI==4.15.0
 fpdf2==2.7.4
+requests==2.31.0
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
