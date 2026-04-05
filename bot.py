@@ -11,6 +11,8 @@ from fpdf import FPDF
 import difflib
 import re
 import requests
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -30,6 +32,13 @@ if not os.path.exists(FONT_PATH):
     except:
         FONT_PATH = None
 
+def reshape_arabic(text):
+    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
+    if any('\u0600' <= c <= '\u06FF' for c in text):
+        reshaped = arabic_reshaper.reshape(text)
+        return get_display(reshaped)
+    return text
+
 # ========== 2. قاعدة البيانات ==========
 conn = sqlite3.connect("exam.db", check_same_thread=False)
 c = conn.cursor()
@@ -42,10 +51,10 @@ c.execute('''CREATE TABLE IF NOT EXISTS exams (
     created_by INTEGER,
     created_at TEXT
 )''')
-c.execute('''CREATE TABLE IF NOT EXISTS students (
+c.execute('''CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
-    points INTEGER DEFAULT 2,
+    points REAL DEFAULT 0,
     total_shares INTEGER DEFAULT 0
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS results (
@@ -79,6 +88,10 @@ def get_exam_by_code(code):
         return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4]}
     return None
 
+def get_exams_by_user(user_id):
+    c.execute("SELECT id, title, link_code, created_at FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
+    return c.fetchall()
+
 def get_all_exams_by_teacher(teacher_id):
     c.execute("SELECT id, title, link_code, created_at FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
     return c.fetchall()
@@ -92,30 +105,32 @@ def get_results_by_exam(exam_id):
     c.execute("SELECT student_id, score, total, percentage FROM results WHERE exam_id=?", (exam_id,))
     return c.fetchall()
 
-def get_student(user_id):
-    c.execute("SELECT points, total_shares FROM students WHERE user_id=?", (user_id,))
+def get_user(user_id):
+    c.execute("SELECT points, total_shares FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
     if not row:
-        c.execute("INSERT INTO students (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 2, 0))
+        c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 0, 0))
         conn.commit()
-        return {"points": 2, "total_shares": 0}
+        return {"points": 0, "total_shares": 0}
     return {"points": row[0], "total_shares": row[1]}
 
 def update_points(user_id, delta):
-    c.execute("UPDATE students SET points = points + ? WHERE user_id=?", (delta, user_id))
+    c.execute("UPDATE users SET points = points + ? WHERE user_id=?", (delta, user_id))
     conn.commit()
 
 def add_share(user_id):
-    c.execute("UPDATE students SET total_shares = total_shares + 1 WHERE user_id=?", (user_id,))
-    c.execute("SELECT total_shares FROM students WHERE user_id=?", (user_id,))
+    c.execute("UPDATE users SET total_shares = total_shares + 1 WHERE user_id=?", (user_id,))
+    c.execute("SELECT total_shares FROM users WHERE user_id=?", (user_id,))
     shares = c.fetchone()[0]
-    if shares % 4 == 0:
-        c.execute("UPDATE students SET points = points + 1 WHERE user_id=?", (user_id,))
+    # كل 4 مشاركات = نقطة كاملة (0.25 × 4)
+    points_from_shares = shares * 0.25
+    c.execute("UPDATE users SET points = ? WHERE user_id=?", (points_from_shares, user_id))
     conn.commit()
 
 def add_referral(referrer_id, referred_id):
     c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?,?,?)", (referrer_id, referred_id, datetime.now().isoformat()))
-    c.execute("UPDATE students SET points = points + 1 WHERE user_id=?", (referrer_id,))
+    # إضافة 0.25 نقطة للداعم
+    update_points(referrer_id, 0.25)
     conn.commit()
 
 def calculate_essay_score(user_answer, correct_answer):
@@ -142,20 +157,18 @@ def get_grade_message(percentage):
     if percentage >= 90:
         return ("ممتاز! 🏆", "أداء رائع، أنت متميز!", (0, 100, 0))
     elif percentage >= 75:
-        return ("جيد جدًا! 👍", "عمل ممتاز، واصل التميز!", (0, 100, 0))
+        return ("جيد جدا! 👍", "عمل ممتاز، واصل التميز!", (0, 100, 0))
     elif percentage >= 60:
         return ("جيد! 📚", "نتيجة جيدة، يمكنك التحسين!", (255, 165, 0))
     elif percentage >= 50:
-        return ("مقبول! 📖", "تحتاج إلى مذاكرة أكثر قليلاً", (255, 165, 0))
+        return ("مقبول! 📖", "تحتاج إلى مذاكرة أكثر قليلا", (255, 165, 0))
     else:
         return ("حظ أوفر! 💪", "لا تيأس، حاول مرة أخرى بعد المذاكرة", (255, 0, 0))
 
 def generate_certificate(user_id, exam_title, score, total, percentage):
-    """شهادة احترافية ملونة باستخدام الخط العادي فقط"""
     pdf = FPDF()
     pdf.add_page()
     
-    # استخدام الخط العربي (بدون نسخة عريضة)
     if FONT_PATH and os.path.exists(FONT_PATH):
         pdf.add_font('Noto', '', FONT_PATH, uni=True)
         pdf.set_font('Noto', '', 20)
@@ -163,8 +176,9 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
         pdf.set_font("Helvetica", "", 20)
     
     # عنوان الشهادة
-    pdf.set_text_color(0, 51, 102)  # أزرق غامق
-    pdf.cell(0, 25, "شهادة إتمام الاختبار", 0, 1, 'C')
+    pdf.set_text_color(0, 51, 102)
+    title_text = reshape_arabic("شهادة إتمام الاختبار")
+    pdf.cell(0, 25, title_text, 0, 1, 'C')
     pdf.ln(5)
     
     # خط فاصل
@@ -177,21 +191,25 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     else:
         pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 12, f"الطالب/الطالبة رقم: {user_id}", 0, 1, 'C')
-    pdf.cell(0, 12, f"الاختبار: {exam_title}", 0, 1, 'C')
-    pdf.cell(0, 12, f"التاريخ: {datetime.now().strftime('%Y/%m/%d')}", 0, 1, 'C')
+    
+    student_text = reshape_arabic(f"الطالب/الطالبة رقم: {user_id}")
+    pdf.cell(0, 12, student_text, 0, 1, 'C')
+    
+    exam_text = reshape_arabic(f"الاختبار: {exam_title}")
+    pdf.cell(0, 12, exam_text, 0, 1, 'C')
+    
+    date_text = reshape_arabic(f"التاريخ: {datetime.now().strftime('%Y/%m/%d')}")
+    pdf.cell(0, 12, date_text, 0, 1, 'C')
     pdf.ln(8)
     
     # مربع النتيجة
     grade_msg, advice, color = get_grade_message(percentage)
     
-    # خلفية مربع النتيجة
-    pdf.set_fill_color(240, 248, 255)  # أزرق فاتح جداً
+    pdf.set_fill_color(240, 248, 255)
     pdf.rect(40, 105, 130, 50, 'F')
     pdf.set_draw_color(0, 102, 204)
     pdf.rect(40, 105, 130, 50)
     
-    # النتيجة داخل المربع
     if FONT_PATH:
         pdf.set_font('Noto', '', 16)
     else:
@@ -199,6 +217,7 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.set_text_color(color[0], color[1], color[2])
     pdf.set_xy(45, 112)
     pdf.cell(120, 12, f"{score:.1f} / {total}", 0, 1, 'C')
+    
     if FONT_PATH:
         pdf.set_font('Noto', '', 12)
     else:
@@ -208,29 +227,31 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     
     pdf.ln(20)
     
-    # عبارة تحفيزية
     if FONT_PATH:
         pdf.set_font('Noto', '', 14)
     else:
         pdf.set_font("Helvetica", "", 14)
     pdf.set_text_color(color[0], color[1], color[2])
-    pdf.cell(0, 12, grade_msg, 0, 1, 'C')
+    grade_text = reshape_arabic(grade_msg)
+    pdf.cell(0, 12, grade_text, 0, 1, 'C')
+    
     if FONT_PATH:
         pdf.set_font('Noto', '', 10)
     else:
         pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 10, advice, 0, 1, 'C')
+    advice_text = reshape_arabic(advice)
+    pdf.cell(0, 10, advice_text, 0, 1, 'C')
     pdf.ln(15)
     
-    # حقوق البوت
     if FONT_PATH:
         pdf.set_font('Noto', '', 9)
     else:
         pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(128, 128, 128)
     pdf.set_y(-25)
-    pdf.cell(0, 8, "@ZeQuiz_Bot", 0, 0, 'C')
+    bot_text = reshape_arabic("@ZeQuiz_Bot")
+    pdf.cell(0, 8, bot_text, 0, 0, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
@@ -240,26 +261,28 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.chat.id
-    student = get_student(user_id)
+    user = get_user(user_id)
     if len(message.text.split()) > 1:
         ref = message.text.split()[1]
         if ref.isdigit() and int(ref) != user_id:
             add_referral(int(ref), user_id)
-            bot.send_message(user_id, "✅ تم تفعيل الإحالة! +1 نقطة للداعم.")
+            bot.send_message(user_id, f"✅ تم تفعيل الإحالة! حصل الداعم على 0.25 نقطة.")
+            bot.send_message(int(ref), f"🎉 قام مستخدم جديد بالتسجيل عبر رابطك! تم إضافة 0.25 نقطة إلى رصيدك.")
     
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📝 دخول إلى اختبار", callback_data="enter_exam"))
+    markup.add(InlineKeyboardButton("📋 اختباراتي", callback_data="my_exams"))
+    markup.add(InlineKeyboardButton("➕ إنشاء اختبار", callback_data="create_exam"))
     markup.add(InlineKeyboardButton("🎁 مشاركة الرابط", callback_data="share_link"))
     if user_id == OWNER_ID:
         markup.add(InlineKeyboardButton("🔧 لوحة التحكم", callback_data="admin_panel"))
-        markup.add(InlineKeyboardButton("➕ إنشاء اختبار", callback_data="create_exam"))
     
     bot.send_message(user_id,
         f"🎓 بوت الاختبارات\n\n"
-        f"• رصيدك: {student['points']} نقطة\n"
+        f"• رصيدك: {user['points']:.2f} نقطة\n"
         f"• إنشاء اختبار جديد يستهلك نقطة واحدة.\n"
         f"• دخول الاختبار مجاني.\n"
-        f"• احصل على نقاط مجانية عبر مشاركة الرابط (كل 4 مشاركات = نقطة).\n"
+        f"• احصل على نقاط عبر مشاركة الرابط (كل مشاركة = 0.25 نقطة).\n"
         f"رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\n"
         f"📌 @ZeQuiz_Bot",
         reply_markup=markup)
@@ -268,7 +291,19 @@ def start(message):
 def share_link(call):
     user_id = call.message.chat.id
     bot.answer_callback_query(call.id)
-    bot.send_message(user_id, f"🎁 رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\nكل 4 مشاركات = نقطة إضافية.")
+    bot.send_message(user_id, f"🎁 رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\nكل مشاركة = 0.25 نقطة!")
+
+@bot.callback_query_handler(func=lambda call: call.data == "my_exams")
+def my_exams(call):
+    user_id = call.message.chat.id
+    exams = get_exams_by_user(user_id)
+    if not exams:
+        bot.send_message(user_id, "📭 لم تقم بإنشاء أي اختبارات بعد.")
+        return
+    txt = "📋 قائمة الاختبارات التي أنشأتها:\n\n"
+    for eid, title, code, created_at in exams:
+        txt += f"• {title}\n   رمز: {code}\n   تاريخ: {created_at[:19]}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+    bot.send_message(user_id, txt)
 
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
 def enter_exam(call):
@@ -343,7 +378,7 @@ def answer_callback(call):
         score = 1.0 if is_correct else 0.0
         percentage = 100.0 if is_correct else 0.0
         result_text = "✅ صحيح" if is_correct else "❌ خطأ"
-    else:  # truefalse
+    else:
         is_correct = (answer == correct)
         score = 1.0 if is_correct else 0.0
         percentage = 100.0 if is_correct else 0.0
@@ -403,11 +438,9 @@ def finish_exam(user_id):
     
     save_result(data["exam_id"], user_id, total_score, total, percentage, details)
     
-    # النتيجة النهائية
     grade_msg, advice, _ = get_grade_message(percentage)
     bot.send_message(user_id, f"🎉 انتهى الاختبار!\nالنتيجة النهائية: {total_score:.1f}/{total} ({percentage:.1f}%)\n\n{grade_msg}\n{advice}")
     
-    # إنشاء الشهادة
     try:
         pdf_path = generate_certificate(user_id, data["title"], total_score, total, percentage)
         if pdf_path and os.path.exists(pdf_path):
@@ -415,14 +448,12 @@ def finish_exam(user_id):
                 bot.send_document(user_id, f, caption="📜 شهادتك - @ZeQuiz_Bot", visible_file_name="certificate.pdf")
             os.unlink(pdf_path)
             
-            # زر مشاركة النتيجة
             share_markup = InlineKeyboardMarkup()
             share_markup.add(InlineKeyboardButton("📢 شارك نتيجتك", callback_data=f"share_result_{user_id}_{int(percentage)}"))
             bot.send_message(user_id, "🎉 هل تريد مشاركة نتيجتك مع أصدقائك؟", reply_markup=share_markup)
     except Exception as e:
         bot.send_message(user_id, f"❌ حدث خطأ أثناء إنشاء الشهادة: {str(e)[:100]}")
 
-# زر مشاركة النتيجة
 @bot.callback_query_handler(func=lambda call: call.data.startswith("share_result_"))
 def share_result(call):
     parts = call.data.split("_")
@@ -431,19 +462,15 @@ def share_result(call):
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, f"🎉 حصلت على نتيجة {percentage}% في اختبار @ZeQuiz_Bot!\n\nشاركها مع أصدقائك: https://t.me/{bot.get_me().username}")
 
-# ========== 4. إنشاء اختبار (يستهلك نقطة) ==========
+# ========== 4. إنشاء اختبار (يستهلك نقطة واحدة) ==========
 temp_exam = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_exam")
 def create_exam_start(call):
-    if call.message.chat.id != OWNER_ID:
-        bot.answer_callback_query(call.id, "غير مصرح")
-        return
-    
     user_id = call.message.chat.id
-    student = get_student(user_id)
-    if student["points"] <= 0:
-        bot.answer_callback_query(call.id, "ليس لديك نقاط كافية لإنشاء اختبار. شارك الرابط لتحصل على نقاط.", show_alert=True)
+    user = get_user(user_id)
+    if user["points"] < 1:
+        bot.answer_callback_query(call.id, f"ليس لديك نقاط كافية لإنشاء اختبار. رصيدك: {user['points']:.2f} نقطة. شارك الرابط لتحصل على نقاط!", show_alert=True)
         return
     
     temp_exam[user_id] = {"step": "title", "questions": [], "answers": []}
@@ -538,18 +565,18 @@ def finish_creation(call):
     if user_id not in temp_exam:
         return
     
-    student = get_student(user_id)
-    if student["points"] <= 0:
-        bot.edit_message_text("❌ ليس لديك نقاط كافية لإنشاء الاختبار.", user_id, call.message.message_id)
+    user = get_user(user_id)
+    if user["points"] < 1:
+        bot.edit_message_text(f"❌ ليس لديك نقاط كافية لإنشاء الاختبار. رصيدك: {user['points']:.2f} نقطة.", user_id, call.message.message_id)
         temp_exam.pop(user_id, None)
         return
     
     update_points(user_id, -1)
     data = temp_exam.pop(user_id)
     eid, code = add_exam(data["title"], data["questions"], data["answers"], user_id)
-    new_points = get_student(user_id)["points"]
+    new_user = get_user(user_id)
     
-    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_points}", user_id, call.message.message_id)
+    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_user['points']:.2f}", user_id, call.message.message_id)
 
 # ========== 5. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
@@ -591,7 +618,7 @@ def add_points_step(message):
     try:
         parts = message.text.split()
         uid = int(parts[0])
-        pts = int(parts[1])
+        pts = float(parts[1])
         update_points(uid, pts)
         bot.send_message(OWNER_ID, f"✅ تم إضافة {pts} نقطة للمستخدم {uid}")
     except:
@@ -608,7 +635,7 @@ def remove_points_step(message):
     try:
         parts = message.text.split()
         uid = int(parts[0])
-        pts = int(parts[1])
+        pts = float(parts[1])
         update_points(uid, -pts)
         bot.send_message(OWNER_ID, f"✅ تم خصم {pts} نقطة من المستخدم {uid}")
     except:
@@ -618,15 +645,15 @@ def remove_points_step(message):
 def admin_stats(call):
     if call.message.chat.id != OWNER_ID:
         return
-    c.execute("SELECT COUNT(*) FROM students")
-    students = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users")
+    users = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM exams")
     exams = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM results")
     results = c.fetchone()[0]
-    c.execute("SELECT SUM(points) FROM students")
+    c.execute("SELECT SUM(points) FROM users")
     total_points = c.fetchone()[0] or 0
-    bot.send_message(OWNER_ID, f"📊 إحصائيات البوت\n👥 الطلاب: {students}\n📚 الاختبارات: {exams}\n📝 المحاولات: {results}\n⭐ مجموع النقاط: {total_points}")
+    bot.send_message(OWNER_ID, f"📊 إحصائيات البوت\n👥 المستخدمون: {users}\n📚 الاختبارات: {exams}\n📝 المحاولات: {results}\n⭐ مجموع النقاط: {total_points:.2f}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_results")
 def admin_results(call):
