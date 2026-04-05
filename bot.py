@@ -6,13 +6,39 @@ import threading
 from deep_translator import GoogleTranslator
 import time
 import re
-from fpdf import FPDF
+import requests
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN not set")
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# تحميل خط عربي (NotoSansArabic) من الإنترنت إذا لم يكن موجوداً
+FONT_PATH = "NotoSansArabic-Regular.ttf"
+if not os.path.exists(FONT_PATH):
+    try:
+        print("Downloading Arabic font...")
+        url = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
+        r = requests.get(url, timeout=30)
+        with open(FONT_PATH, "wb") as f:
+            f.write(r.content)
+        print("Font downloaded successfully.")
+    except:
+        print("Could not download font, will use default fallback.")
+
+# تسجيل الخط في reportlab
+try:
+    pdfmetrics.registerFont(TTFont('NotoSansArabic', FONT_PATH))
+    ARABIC_FONT = 'NotoSansArabic'
+except:
+    ARABIC_FONT = 'Helvetica'  # خط احتياطي
 
 # اللغات المدعومة
 LANGUAGES = {
@@ -23,6 +49,12 @@ LANGUAGES = {
 }
 
 user_sessions = {}
+
+def reshape_arabic(text):
+    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
+    reshaped = arabic_reshaper.reshape(text)
+    bidi_text = get_display(reshaped)
+    return bidi_text
 
 def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
     translator = GoogleTranslator(source='auto', target=target_lang)
@@ -46,38 +78,53 @@ def translate_long_text(text, target_lang, chunk_size=1500, user_id=None):
             translated_parts.append(translator.translate(chunk))
             if (i+1) % 5 == 0 or i+1 == total:
                 if user_id:
-                    bot.send_message(user_id, f"Progress: {i+1}/{total} parts")
+                    bot.send_message(user_id, f"Translation progress: {i+1}/{total} parts")
         except Exception as e:
-            translated_parts.append(f"[Error part {i+1}]")
+            translated_parts.append(f"[Error in part {i+1}]")
         time.sleep(0.3)
     return " ".join(translated_parts)
 
 def create_bilingual_pdf(original, translated, output_path):
-    pdf = FPDF()
-    pdf.add_page()
-    # Use a font that supports Arabic (DejaVu is available on Heroku)
-    try:
-        pdf.add_font('DejaVu', '', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', uni=True)
-        pdf.set_font('DejaVu', '', 12)
-    except:
-        pdf.set_font('Helvetica', '', 12)
+    """إنشاء PDF مع نصوص عربية مشكلة بشكل صحيح"""
+    c = canvas.Canvas(output_path, pagesize=A4)
+    width, height = A4
+    c.setFont(ARABIC_FONT, 12)
     
-    pdf.set_text_color(0, 0, 150)
-    pdf.cell(0, 10, "Original text:", ln=1)
-    pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 8, original)
-    pdf.ln(8)
+    # النص الأصلي
+    c.setFillColorRGB(0, 0, 0.6)  # أزرق
+    c.drawString(50, height - 50, "النص الأصلي:")
+    c.setFillColorRGB(0, 0, 0)
+    y = height - 70
+    for line in original.split('\n'):
+        if y < 50:
+            c.showPage()
+            y = height - 50
+            c.setFont(ARABIC_FONT, 12)
+        reshaped_line = reshape_arabic(line) if ARABIC_FONT == 'NotoSansArabic' else line
+        c.drawString(50, y, reshaped_line[:100])
+        y -= 15
     
-    pdf.set_text_color(0, 100, 0)
-    pdf.cell(0, 10, "Translated text:", ln=1)
-    pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 8, translated)
+    # النص المترجم
+    c.showPage()
+    c.setFont(ARABIC_FONT, 12)
+    c.setFillColorRGB(0, 0.5, 0)  # أخضر
+    c.drawString(50, height - 50, "النص المترجم:")
+    c.setFillColorRGB(0, 0, 0)
+    y = height - 70
+    for line in translated.split('\n'):
+        if y < 50:
+            c.showPage()
+            y = height - 50
+            c.setFont(ARABIC_FONT, 12)
+        reshaped_line = reshape_arabic(line) if ARABIC_FONT == 'NotoSansArabic' else line
+        c.drawString(50, y, reshaped_line[:100])
+        y -= 15
     
-    pdf.set_y(-30)
-    pdf.set_font_size(9)
-    pdf.set_text_color(128, 128, 128)
-    pdf.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
-    pdf.output(output_path)
+    # تذييل الحقوق
+    c.setFillColorRGB(0.5, 0.5, 0.5)
+    c.setFont(ARABIC_FONT, 8)
+    c.drawString(50, 30, "تمت الترجمة بواسطة @zakros_onlinebot")
+    c.save()
 
 def process_translation(user_id, target_lang, target_name):
     session = user_sessions.get(user_id)
@@ -110,7 +157,7 @@ def process_translation(user_id, target_lang, target_name):
 def start(message):
     bot.send_message(
         message.chat.id,
-        "Send me a .txt file or a text message. I will translate it and send you a PDF.\nBot credit: @zakros_onlinebot"
+        "Send me a .txt file or a text message. I will translate it into the language you choose and send you a beautifully formatted PDF with the original and translated text.\nBot credit: @zakros_onlinebot"
     )
 
 @bot.message_handler(content_types=['document'])
