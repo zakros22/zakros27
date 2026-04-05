@@ -122,14 +122,12 @@ def add_share(user_id):
     c.execute("UPDATE users SET total_shares = total_shares + 1 WHERE user_id=?", (user_id,))
     c.execute("SELECT total_shares FROM users WHERE user_id=?", (user_id,))
     shares = c.fetchone()[0]
-    # كل 4 مشاركات = نقطة كاملة (0.25 × 4)
     points_from_shares = shares * 0.25
     c.execute("UPDATE users SET points = ? WHERE user_id=?", (points_from_shares, user_id))
     conn.commit()
 
 def add_referral(referrer_id, referred_id):
     c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?,?,?)", (referrer_id, referred_id, datetime.now().isoformat()))
-    # إضافة 0.25 نقطة للداعم
     update_points(referrer_id, 0.25)
     conn.commit()
 
@@ -242,16 +240,22 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.set_text_color(100, 100, 100)
     advice_text = reshape_arabic(advice)
     pdf.cell(0, 10, advice_text, 0, 1, 'C')
-    pdf.ln(15)
+    pdf.ln(10)
+    
+    # ========== مربع حقوق البوت ==========
+    pdf.set_fill_color(230, 240, 255)  # لون أزرق فاتح جداً
+    pdf.rect(50, 230, 110, 25, 'F')
+    pdf.set_draw_color(0, 102, 204)
+    pdf.rect(50, 230, 110, 25)
     
     if FONT_PATH:
-        pdf.set_font('Noto', '', 9)
+        pdf.set_font('Noto', '', 11)
     else:
-        pdf.set_font("Helvetica", "", 9)
-    pdf.set_text_color(128, 128, 128)
-    pdf.set_y(-25)
+        pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(0, 51, 102)
+    pdf.set_xy(55, 238)
     bot_text = reshape_arabic("@ZeQuiz_Bot")
-    pdf.cell(0, 8, bot_text, 0, 0, 'C')
+    pdf.cell(100, 10, bot_text, 0, 1, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
