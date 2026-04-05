@@ -9,6 +9,8 @@ import time
 import threading
 import tempfile
 import requests
+import zipfile
+import io
 from fpdf import FPDF
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -24,15 +26,13 @@ FONT_PATH = "DejaVuSans.ttf"
 
 if not os.path.exists(FONT_PATH):
     try:
-        import zipfile
-        import io
         print("Downloading font...")
         r = requests.get(FONT_URL, timeout=30)
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             with z.open("dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf") as f:
                 with open(FONT_PATH, "wb") as out:
                     out.write(f.read())
-        print("Font installed.")
+        print("Font installed successfully.")
     except Exception as e:
         print(f"Font download failed: {e}")
         FONT_PATH = None
@@ -47,6 +47,7 @@ class PDF(FPDF):
         else:
             self.set_font('Helvetica', '', 12)
             self.font_name = 'Helvetica'
+        self.add_page()  # فتح صفحة أولى تلقائياً
     
     def header(self):
         if self.page_no() > 1:
@@ -220,7 +221,7 @@ def process_translation(user_id, target_lang, target_name):
         
         # إنشاء PDF
         update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
-        pdf = PDF()
+        pdf = PDF()  # الصفحة الأولى مفتوحة تلقائياً
         for i, (orig, trans) in enumerate(zip(sections, translated_sections), 1):
             if i > 1:
                 pdf.add_page()
