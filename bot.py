@@ -33,7 +33,6 @@ if not os.path.exists(FONT_PATH):
         FONT_PATH = None
 
 def reshape_arabic(text):
-    """إعادة تشكيل النص العربي للعرض بشكل صحيح"""
     if any('\u0600' <= c <= '\u06FF' for c in text):
         reshaped = arabic_reshaper.reshape(text)
         return get_display(reshaped)
@@ -54,7 +53,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS exams (
 c.execute('''CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
-    points REAL DEFAULT 0,
+    points REAL DEFAULT 2,
     total_shares INTEGER DEFAULT 0
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS results (
@@ -109,9 +108,10 @@ def get_user(user_id):
     c.execute("SELECT points, total_shares FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
     if not row:
-        c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 0, 0))
+        # كل مستخدم جديد يبدأ بنقطتين مجانيتين
+        c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 2, 0))
         conn.commit()
-        return {"points": 0, "total_shares": 0}
+        return {"points": 2, "total_shares": 0}
     return {"points": row[0], "total_shares": row[1]}
 
 def update_points(user_id, delta):
@@ -242,8 +242,8 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.cell(0, 10, advice_text, 0, 1, 'C')
     pdf.ln(10)
     
-    # ========== مربع حقوق البوت ==========
-    pdf.set_fill_color(230, 240, 255)  # لون أزرق فاتح جداً
+    # مربع حقوق البوت @ZeQuiz_Bot
+    pdf.set_fill_color(230, 240, 255)
     pdf.rect(50, 230, 110, 25, 'F')
     pdf.set_draw_color(0, 102, 204)
     pdf.rect(50, 230, 110, 25)
