@@ -138,49 +138,35 @@ def calculate_essay_score(user_answer, correct_answer):
     
     return round(final_ratio, 2), final_percentage
 
-def generate_certificate(user_id, exam_title, score, total, percentage, details):
+def generate_certificate(user_id, exam_title, score, total, percentage):
+    """شهادة بسيطة بصفحة واحدة تحتوي على النتيجة الإجمالية فقط"""
     pdf = FPDF()
     pdf.add_page()
     
-    # استخدام الخط العربي إذا كان موجوداً
     if FONT_PATH and os.path.exists(FONT_PATH):
         pdf.add_font('Noto', '', FONT_PATH, uni=True)
-        pdf.set_font('Noto', '', 16)
+        pdf.set_font('Noto', '', 20)
     else:
-        pdf.set_font("Helvetica", "", 16)
+        pdf.set_font("Helvetica", "", 20)
     
-    pdf.cell(0, 15, "Certificate of Completion", 0, 1, 'C')
-    pdf.set_font_size(12)
-    pdf.cell(0, 10, f"Student ID: {user_id}", 0, 1, 'C')
-    pdf.cell(0, 10, f"Exam: {exam_title}", 0, 1, 'C')
-    pdf.cell(0, 10, f"Total Score: {score:.1f}/{total} ({percentage:.1f}%)", 0, 1, 'C')
-    pdf.ln(5)
-    pdf.set_font_size(11)
-    pdf.cell(0, 8, "Detailed Results:", 0, 1, 'L')
-    pdf.set_font_size(9)
+    # العنوان
+    pdf.cell(0, 30, "Certificate of Completion", 0, 1, 'C')
+    pdf.ln(10)
     
-    for i, d in enumerate(details[:20]):
-        q_type = d.get("type", "unknown")
-        if q_type == "essay":
-            type_text = "Essay"
-        elif q_type == "mcq":
-            type_text = "MCQ"
-        else:
-            type_text = "True/False"
-        
-        pdf.cell(0, 5, f"Q{i+1}. {d['question'][:50]}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   Type: {type_text}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   Your answer: {d['user_answer'][:40]}", 0, 1, 'L')
-        pdf.cell(0, 4, f"   Correct answer: {d['correct_answer'][:40]}", 0, 1, 'L')
-        if q_type == "essay":
-            pdf.cell(0, 4, f"   Score: {d['score']:.1f}/{d['max_score']} ({d['percentage']:.0f}%)", 0, 1, 'L')
-        else:
-            pdf.cell(0, 4, f"   Score: {int(d['score'])}/{int(d['max_score'])}", 0, 1, 'L')
-        pdf.ln(2)
+    pdf.set_font_size(14)
+    pdf.cell(0, 12, f"Student ID: {user_id}", 0, 1, 'C')
+    pdf.cell(0, 12, f"Exam: {exam_title}", 0, 1, 'C')
+    pdf.ln(10)
     
-    pdf.set_y(-25)
-    pdf.set_font_size(8)
-    pdf.cell(0, 8, "@zakros_onlinebot", 0, 0, 'C')
+    # النتيجة
+    pdf.set_font_size(16)
+    pdf.cell(0, 15, f"Final Score: {score:.1f} / {total} ({percentage:.1f}%)", 0, 1, 'C')
+    pdf.ln(20)
+    
+    # حقوق البوت
+    pdf.set_font_size(10)
+    pdf.set_y(-30)
+    pdf.cell(0, 10, "@ZeQuiz_Bot", 0, 0, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
@@ -211,7 +197,7 @@ def start(message):
         f"• دخول الاختبار مجاني.\n"
         f"• احصل على نقاط مجانية عبر مشاركة الرابط (كل 4 مشاركات = نقطة).\n"
         f"رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\n"
-        f"📌 @zakros_onlinebot",
+        f"📌 @ZeQuiz_Bot",
         reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "share_link")
@@ -341,7 +327,7 @@ def finish_exam(user_id):
     total_score = sum(s["score"] for s in data["scores"])
     percentage = (total_score / total) * 100
     
-    # تجميع التفاصيل للشهادة
+    # حفظ النتيجة
     details = []
     for i, (q, user_ans, correct, score_info) in enumerate(zip(data["questions"], data["user_ans"], data["answers"], data["scores"])):
         details.append({
@@ -359,12 +345,12 @@ def finish_exam(user_id):
     # إرسال النتيجة النهائية
     bot.send_message(user_id, f"🎉 انتهى الاختبار!\nالنتيجة النهائية: {total_score:.1f}/{total} ({percentage:.1f}%)")
     
-    # إنشاء وإرسال الشهادة
+    # إنشاء وإرسال الشهادة (بدون تفاصيل الأسئلة)
     try:
-        pdf_path = generate_certificate(user_id, data["title"], total_score, total, percentage, details)
+        pdf_path = generate_certificate(user_id, data["title"], total_score, total, percentage)
         if pdf_path and os.path.exists(pdf_path):
             with open(pdf_path, 'rb') as f:
-                bot.send_document(user_id, f, caption="📜 شهادتك", visible_file_name="certificate.pdf")
+                bot.send_document(user_id, f, caption="📜 شهادتك - @ZeQuiz_Bot", visible_file_name="certificate.pdf")
             os.unlink(pdf_path)
     except Exception as e:
         bot.send_message(user_id, f"❌ حدث خطأ أثناء إنشاء الشهادة: {str(e)[:100]}")
