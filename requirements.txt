@@ -1,2 +1,4 @@
 pyTelegramBotAPI==4.15.0
-groq==0.7.0
+googletrans==4.0.0rc1
+httpx==0.24.0
+requests==2.31.0
