@@ -20,7 +20,7 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. تحميل الخط العالمي (يدعم العربية واللاتينية) ==========
+# ========== 1. تحميل الخط العالمي ==========
 FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
 FONT_PATH = "NotoSansArabic-Regular.ttf"
 if not os.path.exists(FONT_PATH):
@@ -32,7 +32,6 @@ if not os.path.exists(FONT_PATH):
         FONT_PATH = None
 
 def reshape_text(text):
-    """إعادة تشكيل النص العربي فقط"""
     if any('\u0600' <= c <= '\u06FF' for c in text):
         return get_display(arabic_reshaper.reshape(text))
     return text
@@ -44,8 +43,9 @@ class PDF(FPDF):
             self.add_font('Noto', '', FONT_PATH, uni=True)
             self.font_name = 'Noto'
         else:
-            self.add_font('Helvetica', '', '', uni=True)
+            self.set_font('Helvetica', '', 12)
             self.font_name = 'Helvetica'
+        self.add_page()  # فتح صفحة أولى
     
     def header(self):
         if self.page_no() > 1:
@@ -68,7 +68,6 @@ class PDF(FPDF):
         self.cell(0, 8, title, ln=1)
         self.set_font(self.font_name, '', 11)
         self.set_text_color(0, 0, 0)
-        # تقسيم النص إلى أسطر قصيرة لتجنب تجاوز الصفحة
         text = reshape_text(text)
         self.multi_cell(0, 7, text)
         self.ln(6)
@@ -207,12 +206,11 @@ def translate_long_text(text, target_lang, user_id, status_msg):
     return " ".join(translated_parts)
 
 def create_pdf(original, translated, output_path, user_id, status_msg):
-    """إنشاء PDF مع ترقيم الصفحات والحقوق"""
     update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
     
-    pdf = PDF()
+    pdf = PDF()  # هنا يتم فتح صفحة أولى تلقائياً
     
-    # النص الأصلي في صفحة منفصلة
+    # النص الأصلي في نفس الصفحة الأولى
     update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 90, "إضافة النص الأصلي...")
     pdf.add_section("📖 النص الأصلي / Original Text", original, color=(0, 0, 150), page_break_before=False)
     
@@ -221,8 +219,6 @@ def create_pdf(original, translated, output_path, user_id, status_msg):
     pdf.add_section("🌍 النص المترجم / Translated Text", translated, color=(0, 100, 0), page_break_before=True)
     
     update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 98, "إضافة حقوق البوت...")
-    # إضافة صفحة إضافية للحقوق إذا رغبت، لكن التذييل يظهر في كل الصفحات
-    
     pdf.output(output_path)
 
 def process_translation(user_id, target_lang, target_name):
