@@ -20,8 +20,9 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== قاعدة البيانات ==========
+# ========== 1. قاعدة البيانات (نقاط، إحالات، مشاركات) ==========
 DB_NAME = "bot_data.db"
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -79,7 +80,7 @@ def add_referral(referrer_id, referred_id):
     conn.commit()
     conn.close()
 
-# ========== تحميل خط عالمي ==========
+# ========== 2. تحميل خط عالمي (يدعم العربية واللاتينية) ==========
 FONT_URL = "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"
 FONT_PATH = "DejaVuSans.ttf"
 if not os.path.exists(FONT_PATH):
@@ -100,7 +101,7 @@ def reshape_text(text):
         return get_display(reshaped)
     return text
 
-# ========== إنشاء PDF ==========
+# ========== 3. إنشاء PDF ==========
 def create_bilingual_pdf(original, translated, output_path):
     pdf = FPDF()
     pdf.add_page()
@@ -110,7 +111,6 @@ def create_bilingual_pdf(original, translated, output_path):
     else:
         pdf.set_font('Helvetica', '', 12)
     
-    # تقسيم النصوص إلى فقرات قصيرة (500 حرف)
     def split_paras(text, max_len=500):
         paras = []
         for sent in text.split('. '):
@@ -129,34 +129,28 @@ def create_bilingual_pdf(original, translated, output_path):
     trans_paras += [""] * (max_paras - len(trans_paras))
     
     for i, (orig, trans) in enumerate(zip(orig_paras, trans_paras)):
-        # النص الأصلي (أزرق)
         pdf.set_text_color(0, 0, 150)
         pdf.cell(0, 10, f"Original Text - Part {i+1}", ln=1)
         pdf.set_text_color(0, 0, 0)
-        orig_display = reshape_text(orig)
-        pdf.multi_cell(0, 8, orig_display)
+        pdf.multi_cell(0, 8, reshape_text(orig))
         pdf.ln(4)
-        # النص المترجم (أخضر)
         pdf.set_text_color(0, 100, 0)
         pdf.cell(0, 10, f"Translated Text - Part {i+1}", ln=1)
         pdf.set_text_color(0, 0, 0)
-        trans_display = reshape_text(trans)
-        pdf.multi_cell(0, 8, trans_display)
+        pdf.multi_cell(0, 8, reshape_text(trans))
         pdf.ln(6)
-        # فاصل
         pdf.set_draw_color(200,200,200)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(4)
         if pdf.get_y() > 250:
             pdf.add_page()
-    # تذييل
     pdf.set_y(-15)
     pdf.set_font_size(8)
     pdf.set_text_color(128,128,128)
     pdf.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
     pdf.output(output_path)
 
-# ========== الترجمة ==========
+# ========== 4. الترجمة ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -219,7 +213,7 @@ def process_translation(user_id, target_lang, target_name):
         if user_id in user_sessions:
             del user_sessions[user_id]
 
-# ========== أوامر البوت ==========
+# ========== 5. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
@@ -302,7 +296,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ Invalid format. Send: user_id points")
 
-# ========== معالجة الملفات والنصوص ==========
+# ========== 6. معالجة الملفات والنصوص ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
