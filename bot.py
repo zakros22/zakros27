@@ -14,6 +14,7 @@ import io
 from fpdf import FPDF
 import arabic_reshaper
 from bidi.algorithm import get_display
+import magic
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -196,7 +197,10 @@ def update_progress(user_id, status_msg, stage, percent, details=""):
     filled = int(bar_length * percent // 100)
     bar = "█" * filled + "░" * (bar_length - filled)
     text = f"{stage}\n[{bar}] {percent}%\n{details}"
-    bot.edit_message_text(text, user_id, status_msg.message_id)
+    try:
+        bot.edit_message_text(text, user_id, status_msg.message_id)
+    except:
+        pass
 
 def split_into_sections(text, max_sentences=3):
     if len(text) > 10000:
@@ -245,6 +249,9 @@ def process_translation(user_id, target_lang, target_name):
     filename = session.get("filename", "user_text.txt")
     status_msg = bot.send_message(user_id, "🔄 جاري تجهيز المعالجة...")
     try:
+        update_progress(user_id, status_msg, "📄 جاري استخراج النص من الملف...", 5, "")
+        time.sleep(1)
+        
         update_progress(user_id, status_msg, "✂️ جاري تقسيم النص إلى أقسام...", 10, "")
         sections = split_into_sections(original_text)
         total_sections = len(sections)
@@ -363,7 +370,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
 
-# ========== 6. معالجة الملفات والنصوص (معدلة لدعم .txt و .TXT) ==========
+# ========== 6. معالجة الملفات والنصوص ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
@@ -372,7 +379,7 @@ def handle_doc(message):
         return
     
     file_name = message.document.file_name
-    # التحقق من الامتداد بأي حالة (TXT, txt, Txt, tXt)
+    # التحقق من الامتداد
     if not file_name.lower().endswith('.txt'):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط")
         return
@@ -383,10 +390,12 @@ def handle_doc(message):
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
         
+        # محاولة فك الترميز
         text = None
         for encoding in ['utf-8', 'cp1256', 'iso-8859-6', 'latin-1']:
             try:
                 text = downloaded.decode(encoding)
+                print(f"Decoded with {encoding}")
                 break
             except:
                 continue
