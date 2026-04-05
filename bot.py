@@ -7,6 +7,11 @@ from datetime import datetime
 import re
 import time
 import threading
+import tempfile
+from fpdf import FPDF
+import requests
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -15,7 +20,55 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. قاعدة البيانات ==========
+# ========== 1. تحميل الخط العربي ==========
+FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
+FONT_PATH = "NotoSansArabic-Regular.ttf"
+if not os.path.exists(FONT_PATH):
+    try:
+        r = requests.get(FONT_URL, timeout=30)
+        with open(FONT_PATH, "wb") as f:
+            f.write(r.content)
+    except:
+        FONT_PATH = None
+
+def reshape_arabic(text):
+    if any('\u0600' <= c <= '\u06FF' for c in text):
+        return get_display(arabic_reshaper.reshape(text))
+    return text
+
+class PDF(FPDF):
+    def __init__(self):
+        super().__init__()
+        if FONT_PATH and os.path.exists(FONT_PATH):
+            self.add_font('Noto', '', FONT_PATH, uni=True)
+            self.font_name = 'Noto'
+        else:
+            self.font_name = 'Helvetica'
+    
+    def header(self):
+        if self.page_no() > 1:
+            self.set_font(self.font_name, '', 9)
+            self.set_text_color(100, 100, 100)
+            self.cell(0, 10, f"Page {self.page_no()}", 0, 0, 'C')
+            self.ln(8)
+    
+    def footer(self):
+        self.set_y(-15)
+        self.set_font(self.font_name, '', 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
+    
+    def write_text(self, text, title, color=(0,0,0)):
+        self.set_font(self.font_name, '', 12)
+        self.set_text_color(color[0], color[1], color[2])
+        self.cell(0, 8, title, ln=1)
+        self.set_font(self.font_name, '', 11)
+        self.set_text_color(0, 0, 0)
+        text = reshape_arabic(text)
+        self.multi_cell(0, 7, text)
+        self.ln(6)
+
+# ========== 2. قاعدة البيانات ==========
 DB_NAME = "bot_data.db"
 
 def get_db_connection():
@@ -100,7 +153,7 @@ def add_referral(referrer_id, referred_id):
         except:
             time.sleep(0.5)
 
-# ========== 2. دوال الترجمة والتقسيم ==========
+# ========== 3. دوال الترجمة ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -111,12 +164,9 @@ LANGUAGES = {
 
 user_sessions = {}
 
-def split_text(text, max_len=3500):
-    """تقسيم النص إلى أجزاء صغيرة (للاستخدام في الترجمة والإرسال)"""
-    if len(text) <= max_len:
-        return [text]
-    parts = []
+def split_text_for_translation(text, max_len=3000):
     sentences = re.split(r'(?<=[.!?؟])\s+', text)
+    parts = []
     current = ""
     for sent in sentences:
         if len(current) + len(sent) + 2 <= max_len:
@@ -127,36 +177,32 @@ def split_text(text, max_len=3500):
             current = sent + " "
     if current:
         parts.append(current.strip())
-    return parts
+    return parts if parts else [text[:max_len]]
 
 def translate_long_text(text, target_lang, user_id=None, status_msg=None):
-    """ترجمة نص طويل مع تحديثات الحالة"""
-    parts = split_text(text, max_len=3500)
+    parts = split_text_for_translation(text)
     translated_parts = []
     total = len(parts)
-    
     for i, part in enumerate(parts, 1):
         if status_msg:
             bot.edit_message_text(f"⏳ جاري الترجمة: الجزء {i} من {total}...", user_id, status_msg.message_id)
         try:
             translator = GoogleTranslator(source='auto', target=target_lang)
-            translated = translator.translate(part)
-            translated_parts.append(translated)
-        except Exception as e:
+            translated_parts.append(translator.translate(part))
+        except:
             translated_parts.append(f"[خطأ في الجزء {i}]")
         time.sleep(0.5)
-    
     return " ".join(translated_parts)
 
-def send_long_message(user_id, text, prefix=""):
-    """إرسال رسالة طويلة بتقسيمها إلى أجزاء"""
-    parts = split_text(text, max_len=3500)
-    for i, part in enumerate(parts, 1):
-        header = f"{prefix} (الجزء {i}/{len(parts)}):\n\n" if len(parts) > 1 else f"{prefix}\n\n"
-        bot.send_message(user_id, header + part)
+def create_pdf(original, translated, output_path):
+    pdf = PDF()
+    pdf.add_page()
+    pdf.write_text(original, "📖 النص الأصلي / Original Text", color=(0, 0, 150))
+    pdf.add_page()
+    pdf.write_text(translated, "🌍 النص المترجم / Translated Text", color=(0, 100, 0))
+    pdf.output(output_path)
 
 def process_translation(user_id, target_lang, target_name):
-    """معالجة الترجمة كاملة مع تحديثات الحالة"""
     session = user_sessions.get(user_id)
     if not session:
         bot.send_message(user_id, "❌ انتهت الجلسة، أعد إرسال الملف.")
@@ -170,44 +216,31 @@ def process_translation(user_id, target_lang, target_name):
     original_text = session["text"]
     filename = session.get("filename", "user_text.txt")
     
-    # رسالة الحالة الرئيسية
-    status = bot.send_message(user_id, "📥 جاري تحضير النص للترجمة...")
+    status = bot.send_message(user_id, "📥 جاري تجهيز الترجمة...")
     
     try:
-        # تحديث: جاري تقسيم النص
-        bot.edit_message_text("✂️ جاري تقسيم النص إلى أجزاء...", user_id, status.message_id)
-        original_parts = split_text(original_text, max_len=3500)
-        bot.edit_message_text(f"📊 تم تقسيم النص إلى {len(original_parts)} جزء.", user_id, status.message_id)
-        
-        # تحديث: جاري الترجمة
-        bot.edit_message_text("🌍 جاري الترجمة... قد تستغرق عدة دقائق.", user_id, status.message_id)
+        bot.edit_message_text("🌍 جاري الترجمة...", user_id, status.message_id)
         translated = translate_long_text(original_text, target_lang, user_id, status)
         
-        # تحديث: جاري حفظ النقاط
-        bot.edit_message_text("💾 جاري حفظ النقاط...", user_id, status.message_id)
+        bot.edit_message_text("📄 جاري إنشاء PDF...", user_id, status.message_id)
+        pdf_path = tempfile.mktemp(suffix='.pdf')
+        create_pdf(original_text, translated, pdf_path)
+        
         update_points(user_id, -1)
         new_points = get_user(user_id)["points"]
         
-        # تحديث: جاري إرسال النتيجة
-        bot.edit_message_text("📤 جاري إرسال النتيجة...", user_id, status.message_id)
+        bot.edit_message_text("📤 جاري إرسال PDF...", user_id, status.message_id)
+        with open(pdf_path, 'rb') as f:
+            bot.send_document(user_id, f, caption=f"✅ تمت الترجمة إلى {target_name}\n⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot", visible_file_name=f"{filename}_{target_lang}.pdf")
         
-        # إرسال النص الأصلي (مقسم)
-        send_long_message(user_id, original_text, "📝 النص الأصلي")
-        
-        # إرسال النص المترجم (مقسم)
-        send_long_message(user_id, translated, f"🌍 الترجمة إلى {target_name}")
-        
-        # إرسال معلومات النقاط
-        bot.send_message(user_id, f"⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot")
-        
-        # تنظيف
+        os.unlink(pdf_path)
         bot.delete_message(user_id, status.message_id)
         del user_sessions[user_id]
         
     except Exception as e:
-        bot.edit_message_text(f"❌ فشل الترجمة: {str(e)[:200]}", user_id, status.message_id)
+        bot.edit_message_text(f"❌ فشل: {str(e)[:200]}", user_id, status.message_id)
 
-# ========== 3. أوامر البوت ==========
+# ========== 4. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
@@ -219,8 +252,8 @@ def start_cmd(message):
             bot.send_message(user_id, "✅ تم تفعيل الإحالة! حصل الداعم على نقطة.")
     user = get_user(user_id)
     bot.send_message(user_id,
-        f"🌍 بوت الترجمة الذكي\n\n"
-        f"• أرسل ملف .txt أو نصاً لأترجمه لك.\n"
+        f"🌍 بوت الترجمة إلى PDF\n\n"
+        f"• أرسل ملف .txt أو نصاً وسأرسل لك PDF مترجماً.\n"
         f"• رصيدك: {user['points']} نقطة\n"
         f"• كل ترجمة = 1 نقطة.\n"
         f"• احصل على نقاط: /share (كل 4 مشاركات = نقطة) أو عبر الإحالة:\n"
@@ -289,7 +322,7 @@ def add_points_step(message):
     except:
         bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
 
-# ========== 4. معالجة الملفات والنصوص ==========
+# ========== 5. معالجة الملفات والنصوص ==========
 @bot.message_handler(content_types=['document'])
 def handle_doc(message):
     user_id = message.chat.id
@@ -346,7 +379,6 @@ def translate_callback(call):
     bot.answer_callback_query(call.id, f"جاري الترجمة إلى {target_name}...")
     bot.edit_message_reply_markup(user_id, call.message.message_id, reply_markup=None)
     
-    # تشغيل المعالجة في خيط منفصل
     thread = threading.Thread(target=process_translation, args=(user_id, target, target_name))
     thread.daemon = True
     thread.start()
