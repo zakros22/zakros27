@@ -5,6 +5,8 @@ from deep_translator import GoogleTranslator
 import sqlite3
 from datetime import datetime
 import re
+import time
+import threading
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -13,11 +15,17 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. قاعدة البيانات ==========
+# ========== 1. قاعدة البيانات (مع حل مشكلة القفل) ==========
 DB_NAME = "bot_data.db"
 
+def get_db_connection():
+    """إنشاء اتصال آمن بقاعدة البيانات"""
+    conn = sqlite3.connect(DB_NAME, timeout=30, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")  # تحسين الأداء وتقليل الأقفال
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -35,43 +43,74 @@ def init_db():
 init_db()
 
 def get_user(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT points, total_shares FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    if not row:
-        c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 2, 0))
-        conn.commit()
-        conn.close()
-        return {"points": 2, "total_shares": 0}
-    conn.close()
-    return {"points": row[0], "total_shares": row[1]}
+    for attempt in range(3):
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("SELECT points, total_shares FROM users WHERE user_id=?", (user_id,))
+            row = c.fetchone()
+            if not row:
+                c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 2, 0))
+                conn.commit()
+                conn.close()
+                return {"points": 2, "total_shares": 0}
+            conn.close()
+            return {"points": row[0], "total_shares": row[1]}
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < 2:
+                time.sleep(0.5)
+                continue
+            raise e
 
 def update_points(user_id, delta):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET points = points + ? WHERE user_id=?", (delta, user_id))
-    conn.commit()
-    conn.close()
+    for attempt in range(3):
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("UPDATE users SET points = points + ? WHERE user_id=?", (delta, user_id))
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < 2:
+                time.sleep(0.5)
+                continue
+            raise e
 
 def add_share(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE users SET total_shares = total_shares + 1 WHERE user_id=?", (user_id,))
-    c.execute("SELECT total_shares FROM users WHERE user_id=?", (user_id,))
-    shares = c.fetchone()[0]
-    if shares % 4 == 0:
-        c.execute("UPDATE users SET points = points + 1 WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
+    for attempt in range(3):
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("UPDATE users SET total_shares = total_shares + 1 WHERE user_id=?", (user_id,))
+            c.execute("SELECT total_shares FROM users WHERE user_id=?", (user_id,))
+            shares = c.fetchone()[0]
+            if shares % 4 == 0:
+                c.execute("UPDATE users SET points = points + 1 WHERE user_id=?", (user_id,))
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < 2:
+                time.sleep(0.5)
+                continue
+            raise e
 
 def add_referral(referrer_id, referred_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO referrals (referrer_id, referred_id, timestamp) VALUES (?,?,?)", (referrer_id, referred_id, datetime.now().isoformat()))
-    c.execute("UPDATE users SET points = points + 1 WHERE user_id=?", (referrer_id,))
-    conn.commit()
-    conn.close()
+    for attempt in range(3):
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("INSERT INTO referrals (referrer_id, referred_id, timestamp) VALUES (?,?,?)", (referrer_id, referred_id, datetime.now().isoformat()))
+            c.execute("UPDATE users SET points = points + 1 WHERE user_id=?", (referrer_id,))
+            conn.commit()
+            conn.close()
+            return
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < 2:
+                time.sleep(0.5)
+                continue
+            raise e
 
 # ========== 2. اللغات ==========
 LANGUAGES = {
@@ -89,7 +128,6 @@ def translate_text(text, target_lang):
     translator = GoogleTranslator(source='auto', target=target_lang)
     try:
         result = translator.translate(text)
-        # التأكد من أن النص المرتجع من الترجمة نص عادي
         return str(result).encode('utf-8').decode('utf-8')
     except Exception as e:
         raise Exception(f"Translation error: {e}")
@@ -143,7 +181,7 @@ def admin_callback(call):
         msg = bot.send_message(OWNER_ID, "أرسل: معرف_المستخدم عدد_النقاط (مثال: 123456789 5)")
         bot.register_next_step_handler(msg, add_points_step)
     elif call.data == "admin_stats":
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM users")
         total_users = c.fetchone()[0]
@@ -154,7 +192,7 @@ def admin_callback(call):
         conn.close()
         bot.send_message(OWNER_ID, f"📊 الإحصائيات:\n👥 المستخدمون: {total_users}\n⭐ النقاط: {total_points}\n📤 المشاركات: {total_shares}")
     elif call.data == "admin_users":
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT user_id, points, total_shares FROM users ORDER BY points DESC LIMIT 20")
         rows = c.fetchall()
@@ -236,21 +274,23 @@ def translate_callback(call):
     bot.edit_message_reply_markup(user_id, call.message.message_id, reply_markup=None)
     msg = bot.send_message(user_id, "⏳ جاري الترجمة...")
     
-    try:
-        translated = translate_text(text, target)
-        update_points(user_id, -1)
-        new_points = get_user(user_id)["points"]
-        
-        # إرسال النص الأصلي والمترجم
-        response = f"📝 *النص الأصلي:*\n{text}\n\n"
-        response += f"🌍 *الترجمة إلى {target_name}:*\n{translated}\n\n"
-        response += f"⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot"
-        
-        bot.send_message(user_id, response, parse_mode="Markdown")
-        bot.delete_message(user_id, msg.message_id)
-        del user_sessions[user_id]
-    except Exception as e:
-        bot.edit_message_text(f"❌ فشل الترجمة: {str(e)[:200]}", user_id, msg.message_id)
+    def do_translation():
+        try:
+            translated = translate_text(text, target)
+            update_points(user_id, -1)
+            new_points = get_user(user_id)["points"]
+            
+            response = f"📝 *النص الأصلي:*\n{text}\n\n"
+            response += f"🌍 *الترجمة إلى {target_name}:*\n{translated}\n\n"
+            response += f"⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot"
+            
+            bot.send_message(user_id, response, parse_mode="Markdown")
+            bot.delete_message(user_id, msg.message_id)
+            del user_sessions[user_id]
+        except Exception as e:
+            bot.edit_message_text(f"❌ فشل الترجمة: {str(e)[:200]}", user_id, msg.message_id)
+    
+    threading.Thread(target=do_translation).start()
 
 if __name__ == "__main__":
     print("✅ البوت يعمل...")
