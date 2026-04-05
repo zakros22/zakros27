@@ -153,7 +153,7 @@ def add_referral(referrer_id, referred_id):
         except:
             time.sleep(0.5)
 
-# ========== 3. دوال الترجمة ==========
+# ========== 3. دوال الترجمة والتقدم ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -163,6 +163,14 @@ LANGUAGES = {
 }
 
 user_sessions = {}
+
+def update_progress(user_id, status_msg, stage, percent, details=""):
+    """تحديث رسالة التقدم"""
+    bar_length = 20
+    filled = int(bar_length * percent // 100)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    text = f"{stage}\n[{bar}] {percent}%\n{details}"
+    bot.edit_message_text(text, user_id, status_msg.message_id)
 
 def split_text_for_translation(text, max_len=3000):
     sentences = re.split(r'(?<=[.!?؟])\s+', text)
@@ -179,27 +187,37 @@ def split_text_for_translation(text, max_len=3000):
         parts.append(current.strip())
     return parts if parts else [text[:max_len]]
 
-def translate_long_text(text, target_lang, user_id=None, status_msg=None):
+def translate_long_text(text, target_lang, user_id, status_msg, total_parts):
+    """ترجمة النص مع تحديث التقدم لكل جزء"""
     parts = split_text_for_translation(text)
     translated_parts = []
     total = len(parts)
     for i, part in enumerate(parts, 1):
-        if status_msg:
-            bot.edit_message_text(f"⏳ جاري الترجمة: الجزء {i} من {total}...", user_id, status_msg.message_id)
+        percent = int((i / total) * 100)
+        update_progress(user_id, status_msg, "🌍 جاري الترجمة...", percent, f"الجزء {i} من {total}")
         try:
             translator = GoogleTranslator(source='auto', target=target_lang)
             translated_parts.append(translator.translate(part))
         except:
             translated_parts.append(f"[خطأ في الجزء {i}]")
-        time.sleep(0.5)
+        time.sleep(0.3)
     return " ".join(translated_parts)
 
-def create_pdf(original, translated, output_path):
+def create_pdf_with_progress(original, translated, output_path, user_id, status_msg):
+    """إنشاء PDF مع تحديث التقدم"""
+    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "جمع النصوص وترقيم الصفحات...")
     pdf = PDF()
+    
+    # الصفحة الأولى: النص الأصلي
     pdf.add_page()
     pdf.write_text(original, "📖 النص الأصلي / Original Text", color=(0, 0, 150))
+    
+    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 92, "إضافة الترجمة وترقيم الصفحات...")
+    # الصفحة الثانية: النص المترجم
     pdf.add_page()
     pdf.write_text(translated, "🌍 النص المترجم / Translated Text", color=(0, 100, 0))
+    
+    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 96, "إضافة حقوق البوت والتذييل...")
     pdf.output(output_path)
 
 def process_translation(user_id, target_lang, target_name):
@@ -216,29 +234,46 @@ def process_translation(user_id, target_lang, target_name):
     original_text = session["text"]
     filename = session.get("filename", "user_text.txt")
     
-    status = bot.send_message(user_id, "📥 جاري تجهيز الترجمة...")
+    # رسالة التقدم الرئيسية
+    status_msg = bot.send_message(user_id, "🔄 جاري تجهيز المعالجة...")
     
     try:
-        bot.edit_message_text("🌍 جاري الترجمة...", user_id, status.message_id)
-        translated = translate_long_text(original_text, target_lang, user_id, status)
+        # 0% - بدء المعالجة
+        update_progress(user_id, status_msg, "📥 جاري تجهيز الملف...", 0, "")
         
-        bot.edit_message_text("📄 جاري إنشاء PDF...", user_id, status.message_id)
+        # 10% - تقسيم النص
+        update_progress(user_id, status_msg, "✂️ جاري تقسيم النص...", 10, "")
+        parts = split_text_for_translation(original_text)
+        total_parts = len(parts)
+        update_progress(user_id, status_msg, "✅ تم تقسيم النص", 20, f"عدد الأجزاء: {total_parts}")
+        
+        # 20%-80% - الترجمة (تحديث داخلي)
+        update_progress(user_id, status_msg, "🌍 جاري الترجمة...", 20, f"بدء ترجمة {total_parts} أجزاء")
+        translated = translate_long_text(original_text, target_lang, user_id, status_msg, total_parts)
+        
+        # 85% - إنشاء PDF
+        update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
         pdf_path = tempfile.mktemp(suffix='.pdf')
-        create_pdf(original_text, translated, pdf_path)
+        create_pdf_with_progress(original_text, translated, pdf_path, user_id, status_msg)
         
+        # 97% - حفظ النقاط
+        update_progress(user_id, status_msg, "💾 جاري حفظ النقاط...", 97, "")
         update_points(user_id, -1)
         new_points = get_user(user_id)["points"]
         
-        bot.edit_message_text("📤 جاري إرسال PDF...", user_id, status.message_id)
+        # 100% - إرسال الملف
+        update_progress(user_id, status_msg, "📤 جاري إرسال الملف...", 100, "اكتمل!")
+        time.sleep(1)  # لحظة لعرض 100%
+        
         with open(pdf_path, 'rb') as f:
             bot.send_document(user_id, f, caption=f"✅ تمت الترجمة إلى {target_name}\n⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot", visible_file_name=f"{filename}_{target_lang}.pdf")
         
         os.unlink(pdf_path)
-        bot.delete_message(user_id, status.message_id)
+        bot.delete_message(user_id, status_msg.message_id)
         del user_sessions[user_id]
         
     except Exception as e:
-        bot.edit_message_text(f"❌ فشل: {str(e)[:200]}", user_id, status.message_id)
+        bot.edit_message_text(f"❌ فشل: {str(e)[:200]}", user_id, status_msg.message_id)
 
 # ========== 4. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
@@ -333,16 +368,13 @@ def handle_doc(message):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط")
         return
     try:
-        status = bot.send_message(user_id, "📥 جاري تحميل الملف...")
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
         text = downloaded.decode('utf-8')
         if len(text.strip()) < 5:
             bot.reply_to(message, "❌ النص قصير جداً")
-            bot.delete_message(user_id, status.message_id)
             return
         user_sessions[user_id] = {"text": text, "filename": message.document.file_name}
-        bot.delete_message(user_id, status.message_id)
         markup = InlineKeyboardMarkup()
         for code, name in LANGUAGES.items():
             markup.add(InlineKeyboardButton(name, callback_data=code))
