@@ -15,7 +15,7 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. قاعدة البيانات (مع حل مشكلة القفل) ==========
+# ========== 1. قاعدة البيانات ==========
 DB_NAME = "bot_data.db"
 
 def get_db_connection():
@@ -55,11 +55,9 @@ def get_user(user_id):
                 return {"points": 2, "total_shares": 0}
             conn.close()
             return {"points": row[0], "total_shares": row[1]}
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < 2:
-                time.sleep(0.5)
-                continue
-            raise e
+        except:
+            time.sleep(0.5)
+    return {"points": 0, "total_shares": 0}
 
 def update_points(user_id, delta):
     for attempt in range(3):
@@ -70,11 +68,8 @@ def update_points(user_id, delta):
             conn.commit()
             conn.close()
             return
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < 2:
-                time.sleep(0.5)
-                continue
-            raise e
+        except:
+            time.sleep(0.5)
 
 def add_share(user_id):
     for attempt in range(3):
@@ -89,11 +84,8 @@ def add_share(user_id):
             conn.commit()
             conn.close()
             return
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < 2:
-                time.sleep(0.5)
-                continue
-            raise e
+        except:
+            time.sleep(0.5)
 
 def add_referral(referrer_id, referred_id):
     for attempt in range(3):
@@ -105,13 +97,10 @@ def add_referral(referrer_id, referred_id):
             conn.commit()
             conn.close()
             return
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < 2:
-                time.sleep(0.5)
-                continue
-            raise e
+        except:
+            time.sleep(0.5)
 
-# ========== 2. اللغات ==========
+# ========== 2. دوال الترجمة والتقسيم ==========
 LANGUAGES = {
     "ar": "العربية",
     "en": "English",
@@ -122,15 +111,103 @@ LANGUAGES = {
 
 user_sessions = {}
 
-def translate_text(text, target_lang):
-    translator = GoogleTranslator(source='auto', target=target_lang)
-    try:
-        result = translator.translate(text)
-        return str(result).encode('utf-8').decode('utf-8')
-    except Exception as e:
-        raise Exception(f"Translation error: {e}")
+def split_text(text, max_len=3500):
+    """تقسيم النص إلى أجزاء صغيرة (للاستخدام في الترجمة والإرسال)"""
+    if len(text) <= max_len:
+        return [text]
+    parts = []
+    sentences = re.split(r'(?<=[.!?؟])\s+', text)
+    current = ""
+    for sent in sentences:
+        if len(current) + len(sent) + 2 <= max_len:
+            current += sent + " "
+        else:
+            if current:
+                parts.append(current.strip())
+            current = sent + " "
+    if current:
+        parts.append(current.strip())
+    return parts
 
-# ========== 3. أوامر البوت (بدون parse_mode) ==========
+def translate_long_text(text, target_lang, user_id=None, status_msg=None):
+    """ترجمة نص طويل مع تحديثات الحالة"""
+    parts = split_text(text, max_len=3500)
+    translated_parts = []
+    total = len(parts)
+    
+    for i, part in enumerate(parts, 1):
+        if status_msg:
+            bot.edit_message_text(f"⏳ جاري الترجمة: الجزء {i} من {total}...", user_id, status_msg.message_id)
+        try:
+            translator = GoogleTranslator(source='auto', target=target_lang)
+            translated = translator.translate(part)
+            translated_parts.append(translated)
+        except Exception as e:
+            translated_parts.append(f"[خطأ في الجزء {i}]")
+        time.sleep(0.5)
+    
+    return " ".join(translated_parts)
+
+def send_long_message(user_id, text, prefix=""):
+    """إرسال رسالة طويلة بتقسيمها إلى أجزاء"""
+    parts = split_text(text, max_len=3500)
+    for i, part in enumerate(parts, 1):
+        header = f"{prefix} (الجزء {i}/{len(parts)}):\n\n" if len(parts) > 1 else f"{prefix}\n\n"
+        bot.send_message(user_id, header + part)
+
+def process_translation(user_id, target_lang, target_name):
+    """معالجة الترجمة كاملة مع تحديثات الحالة"""
+    session = user_sessions.get(user_id)
+    if not session:
+        bot.send_message(user_id, "❌ انتهت الجلسة، أعد إرسال الملف.")
+        return
+    
+    user = get_user(user_id)
+    if user["points"] <= 0:
+        bot.send_message(user_id, "❌ رصيدك لا يكفي. استخدم /share")
+        return
+    
+    original_text = session["text"]
+    filename = session.get("filename", "user_text.txt")
+    
+    # رسالة الحالة الرئيسية
+    status = bot.send_message(user_id, "📥 جاري تحضير النص للترجمة...")
+    
+    try:
+        # تحديث: جاري تقسيم النص
+        bot.edit_message_text("✂️ جاري تقسيم النص إلى أجزاء...", user_id, status.message_id)
+        original_parts = split_text(original_text, max_len=3500)
+        bot.edit_message_text(f"📊 تم تقسيم النص إلى {len(original_parts)} جزء.", user_id, status.message_id)
+        
+        # تحديث: جاري الترجمة
+        bot.edit_message_text("🌍 جاري الترجمة... قد تستغرق عدة دقائق.", user_id, status.message_id)
+        translated = translate_long_text(original_text, target_lang, user_id, status)
+        
+        # تحديث: جاري حفظ النقاط
+        bot.edit_message_text("💾 جاري حفظ النقاط...", user_id, status.message_id)
+        update_points(user_id, -1)
+        new_points = get_user(user_id)["points"]
+        
+        # تحديث: جاري إرسال النتيجة
+        bot.edit_message_text("📤 جاري إرسال النتيجة...", user_id, status.message_id)
+        
+        # إرسال النص الأصلي (مقسم)
+        send_long_message(user_id, original_text, "📝 النص الأصلي")
+        
+        # إرسال النص المترجم (مقسم)
+        send_long_message(user_id, translated, f"🌍 الترجمة إلى {target_name}")
+        
+        # إرسال معلومات النقاط
+        bot.send_message(user_id, f"⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot")
+        
+        # تنظيف
+        bot.delete_message(user_id, status.message_id)
+        del user_sessions[user_id]
+        
+    except Exception as e:
+        bot.edit_message_text(f"❌ فشل الترجمة: {str(e)[:200]}", user_id, status.message_id)
+
+# ========== 3. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.chat.id
@@ -223,13 +300,16 @@ def handle_doc(message):
         bot.reply_to(message, "❌ أرسل ملف .txt فقط")
         return
     try:
+        status = bot.send_message(user_id, "📥 جاري تحميل الملف...")
         file_info = bot.get_file(message.document.file_id)
         downloaded = bot.download_file(file_info.file_path)
         text = downloaded.decode('utf-8')
         if len(text.strip()) < 5:
             bot.reply_to(message, "❌ النص قصير جداً")
+            bot.delete_message(user_id, status.message_id)
             return
-        user_sessions[user_id] = text
+        user_sessions[user_id] = {"text": text, "filename": message.document.file_name}
+        bot.delete_message(user_id, status.message_id)
         markup = InlineKeyboardMarkup()
         for code, name in LANGUAGES.items():
             markup.add(InlineKeyboardButton(name, callback_data=code))
@@ -247,7 +327,7 @@ def handle_text(message):
     if len(text) < 5:
         bot.reply_to(message, "❌ النص قصير جداً")
         return
-    user_sessions[user_id] = text
+    user_sessions[user_id] = {"text": text, "filename": "user_text.txt"}
     markup = InlineKeyboardMarkup()
     for code, name in LANGUAGES.items():
         markup.add(InlineKeyboardButton(name, callback_data=code))
@@ -258,36 +338,18 @@ def translate_callback(call):
     user_id = call.message.chat.id
     target = call.data
     target_name = LANGUAGES[target]
-    text = user_sessions.get(user_id)
-    if not text:
+    session = user_sessions.get(user_id)
+    if not session:
         bot.answer_callback_query(call.id, "انتهت الجلسة، أعد الإرسال", True)
-        return
-    user = get_user(user_id)
-    if user["points"] <= 0:
-        bot.answer_callback_query(call.id, "لا نقاط كافية", True)
         return
     
     bot.answer_callback_query(call.id, f"جاري الترجمة إلى {target_name}...")
     bot.edit_message_reply_markup(user_id, call.message.message_id, reply_markup=None)
-    msg = bot.send_message(user_id, "⏳ جاري الترجمة...")
     
-    def do_translation():
-        try:
-            translated = translate_text(text, target)
-            update_points(user_id, -1)
-            new_points = get_user(user_id)["points"]
-            
-            response = f"📝 النص الأصلي:\n{text}\n\n"
-            response += f"🌍 الترجمة إلى {target_name}:\n{translated}\n\n"
-            response += f"⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot"
-            
-            bot.send_message(user_id, response)
-            bot.delete_message(user_id, msg.message_id)
-            del user_sessions[user_id]
-        except Exception as e:
-            bot.edit_message_text(f"❌ فشل الترجمة: {str(e)[:200]}", user_id, msg.message_id)
-    
-    threading.Thread(target=do_translation).start()
+    # تشغيل المعالجة في خيط منفصل
+    thread = threading.Thread(target=process_translation, args=(user_id, target, target_name))
+    thread.daemon = True
+    thread.start()
 
 if __name__ == "__main__":
     print("✅ البوت يعمل...")
