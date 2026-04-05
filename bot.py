@@ -20,7 +20,7 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. تحميل الخط العربي ==========
+# ========== 1. تحميل الخط العالمي (يدعم العربية واللاتينية) ==========
 FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
 FONT_PATH = "NotoSansArabic-Regular.ttf"
 if not os.path.exists(FONT_PATH):
@@ -31,7 +31,8 @@ if not os.path.exists(FONT_PATH):
     except:
         FONT_PATH = None
 
-def reshape_arabic(text):
+def reshape_text(text):
+    """إعادة تشكيل النص العربي فقط"""
     if any('\u0600' <= c <= '\u06FF' for c in text):
         return get_display(arabic_reshaper.reshape(text))
     return text
@@ -43,6 +44,7 @@ class PDF(FPDF):
             self.add_font('Noto', '', FONT_PATH, uni=True)
             self.font_name = 'Noto'
         else:
+            self.add_font('Helvetica', '', '', uni=True)
             self.font_name = 'Helvetica'
     
     def header(self):
@@ -58,13 +60,16 @@ class PDF(FPDF):
         self.set_text_color(128, 128, 128)
         self.cell(0, 10, "Translation by @zakros_onlinebot", 0, 0, 'C')
     
-    def write_text(self, text, title, color=(0,0,0)):
+    def add_section(self, title, text, color=(0,0,0), page_break_before=False):
+        if page_break_before:
+            self.add_page()
         self.set_font(self.font_name, '', 12)
         self.set_text_color(color[0], color[1], color[2])
         self.cell(0, 8, title, ln=1)
         self.set_font(self.font_name, '', 11)
         self.set_text_color(0, 0, 0)
-        text = reshape_arabic(text)
+        # تقسيم النص إلى أسطر قصيرة لتجنب تجاوز الصفحة
+        text = reshape_text(text)
         self.multi_cell(0, 7, text)
         self.ln(6)
 
@@ -165,7 +170,6 @@ LANGUAGES = {
 user_sessions = {}
 
 def update_progress(user_id, status_msg, stage, percent, details=""):
-    """تحديث رسالة التقدم"""
     bar_length = 20
     filled = int(bar_length * percent // 100)
     bar = "█" * filled + "░" * (bar_length - filled)
@@ -187,8 +191,7 @@ def split_text_for_translation(text, max_len=3000):
         parts.append(current.strip())
     return parts if parts else [text[:max_len]]
 
-def translate_long_text(text, target_lang, user_id, status_msg, total_parts):
-    """ترجمة النص مع تحديث التقدم لكل جزء"""
+def translate_long_text(text, target_lang, user_id, status_msg):
     parts = split_text_for_translation(text)
     translated_parts = []
     total = len(parts)
@@ -199,25 +202,27 @@ def translate_long_text(text, target_lang, user_id, status_msg, total_parts):
             translator = GoogleTranslator(source='auto', target=target_lang)
             translated_parts.append(translator.translate(part))
         except:
-            translated_parts.append(f"[خطأ في الجزء {i}]")
+            translated_parts.append(f"[Error in part {i}]")
         time.sleep(0.3)
     return " ".join(translated_parts)
 
-def create_pdf_with_progress(original, translated, output_path, user_id, status_msg):
-    """إنشاء PDF مع تحديث التقدم"""
-    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "جمع النصوص وترقيم الصفحات...")
+def create_pdf(original, translated, output_path, user_id, status_msg):
+    """إنشاء PDF مع ترقيم الصفحات والحقوق"""
+    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
+    
     pdf = PDF()
     
-    # الصفحة الأولى: النص الأصلي
-    pdf.add_page()
-    pdf.write_text(original, "📖 النص الأصلي / Original Text", color=(0, 0, 150))
+    # النص الأصلي في صفحة منفصلة
+    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 90, "إضافة النص الأصلي...")
+    pdf.add_section("📖 النص الأصلي / Original Text", original, color=(0, 0, 150), page_break_before=False)
     
-    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 92, "إضافة الترجمة وترقيم الصفحات...")
-    # الصفحة الثانية: النص المترجم
-    pdf.add_page()
-    pdf.write_text(translated, "🌍 النص المترجم / Translated Text", color=(0, 100, 0))
+    # النص المترجم في صفحة جديدة
+    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 95, "إضافة الترجمة...")
+    pdf.add_section("🌍 النص المترجم / Translated Text", translated, color=(0, 100, 0), page_break_before=True)
     
-    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 96, "إضافة حقوق البوت والتذييل...")
+    update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 98, "إضافة حقوق البوت...")
+    # إضافة صفحة إضافية للحقوق إذا رغبت، لكن التذييل يظهر في كل الصفحات
+    
     pdf.output(output_path)
 
 def process_translation(user_id, target_lang, target_name):
@@ -234,36 +239,30 @@ def process_translation(user_id, target_lang, target_name):
     original_text = session["text"]
     filename = session.get("filename", "user_text.txt")
     
-    # رسالة التقدم الرئيسية
     status_msg = bot.send_message(user_id, "🔄 جاري تجهيز المعالجة...")
     
     try:
-        # 0% - بدء المعالجة
-        update_progress(user_id, status_msg, "📥 جاري تجهيز الملف...", 0, "")
+        update_progress(user_id, status_msg, "📥 جاري تجهيز الملف...", 5, "")
         
-        # 10% - تقسيم النص
-        update_progress(user_id, status_msg, "✂️ جاري تقسيم النص...", 10, "")
+        # تقسيم النص
         parts = split_text_for_translation(original_text)
         total_parts = len(parts)
-        update_progress(user_id, status_msg, "✅ تم تقسيم النص", 20, f"عدد الأجزاء: {total_parts}")
+        update_progress(user_id, status_msg, "✂️ جاري تقسيم النص...", 15, f"عدد الأجزاء: {total_parts}")
         
-        # 20%-80% - الترجمة (تحديث داخلي)
-        update_progress(user_id, status_msg, "🌍 جاري الترجمة...", 20, f"بدء ترجمة {total_parts} أجزاء")
-        translated = translate_long_text(original_text, target_lang, user_id, status_msg, total_parts)
+        # الترجمة
+        translated = translate_long_text(original_text, target_lang, user_id, status_msg)
         
-        # 85% - إنشاء PDF
-        update_progress(user_id, status_msg, "📄 جاري إنشاء PDF...", 85, "تجهيز الصفحات...")
+        # إنشاء PDF
         pdf_path = tempfile.mktemp(suffix='.pdf')
-        create_pdf_with_progress(original_text, translated, pdf_path, user_id, status_msg)
+        create_pdf(original_text, translated, pdf_path, user_id, status_msg)
         
-        # 97% - حفظ النقاط
-        update_progress(user_id, status_msg, "💾 جاري حفظ النقاط...", 97, "")
+        # حفظ النقاط
         update_points(user_id, -1)
         new_points = get_user(user_id)["points"]
         
-        # 100% - إرسال الملف
+        # إرسال الملف
         update_progress(user_id, status_msg, "📤 جاري إرسال الملف...", 100, "اكتمل!")
-        time.sleep(1)  # لحظة لعرض 100%
+        time.sleep(1)
         
         with open(pdf_path, 'rb') as f:
             bot.send_document(user_id, f, caption=f"✅ تمت الترجمة إلى {target_name}\n⭐ النقاط المتبقية: {new_points}\n📌 @zakros_onlinebot", visible_file_name=f"{filename}_{target_lang}.pdf")
