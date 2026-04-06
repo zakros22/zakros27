@@ -334,7 +334,7 @@ def process_exam_code(message):
         return
     
     total_questions = len(exam["questions"])
-    if exam["total_time"] > 0:
+    if exam["total_time"] > 0 and total_questions > 0:
         time_per_question = exam["total_time"] / total_questions
     else:
         time_per_question = 0
@@ -347,36 +347,66 @@ def process_exam_code(message):
         "user_ans": [],
         "scores": [],
         "index": 0,
-        "question_start_time": time.time(),
         "time_per_question": time_per_question,
-        "total_time": exam["total_time"]
+        "timer_active": False,
+        "timer_thread": None,
+        "current_message_id": None
     }
     send_question(user_id)
 
 user_answers = {}
 
-def send_question(user_id):
+def start_timer(user_id, duration):
+    """بدء مؤقت تنازلي للسؤال"""
     data = user_answers.get(user_id)
     if not data:
         return
     
-    # التحقق من الوقت المتبقي للسؤال الحالي
-    if data["time_per_question"] > 0:
-        elapsed = time.time() - data["question_start_time"]
-        remaining = data["time_per_question"] - elapsed
+    data["timer_active"] = True
+    start_time = time.time()
+    end_time = start_time + duration
+    
+    while data["timer_active"] and time.time() < end_time:
+        remaining = int(end_time - time.time())
         if remaining <= 0:
-            # انتهى وقت هذا السؤال، ننتقل للسؤال التالي بدون إجابة
-            bot.send_message(user_id, f"⏰ انتهى وقت السؤال {data['index'] + 1}! سيتم الانتقال للسؤال التالي.")
-            data["user_ans"].append("(لم يجب)")
-            data["scores"].append({"score": 0, "percentage": 0})
-            data["index"] += 1
-            data["question_start_time"] = time.time()
-            send_question(user_id)
-            return
-        remaining_sec = int(remaining)
-        time_msg = f"\n⏰ الوقت المتبقي للسؤال: {remaining_sec} ثانية"
-    else:
-        time_msg = ""
+            break
+        
+        # تحديث رسالة المؤقت
+        if data["current_message_id"]:
+            try:
+                bot.edit_message_text(
+                    f"⏰ الوقت المتبقي: {remaining} ثانية", 
+                    user_id, 
+                    data["current_message_id"]
+                )
+            except:
+                pass
+        time.sleep(1)
+    
+    if data["timer_active"]:
+        # انتهى الوقت
+        data["timer_active"] = False
+        bot.send_message(user_id, f"⏰ انتهى وقت السؤال {data['index'] + 1}! سيتم الانتقال للسؤال التالي.")
+        
+        # تسجيل عدم الإجابة
+        data["user_ans"].append("(لم يجب)")
+        data["scores"].append({"score": 0, "percentage": 0})
+        data["index"] += 1
+        
+        # إخفاء رسالة المؤقت
+        if data["current_message_id"]:
+            try:
+                bot.delete_message(user_id, data["current_message_id"])
+            except:
+                pass
+            data["current_message_id"] = None
+        
+        send_question(user_id)
+
+def send_question(user_id):
+    data = user_answers.get(user_id)
+    if not data:
+        return
     
     idx = data["index"]
     if idx >= len(data["questions"]):
@@ -384,19 +414,35 @@ def send_question(user_id):
         return
     
     q = data["questions"][idx]
+    
+    # إرسال المؤقت أولاً
+    if data["time_per_question"] > 0:
+        timer_msg = bot.send_message(user_id, f"⏰ سيبدأ السؤال خلال 3 ثوان...")
+        time.sleep(3)
+        bot.delete_message(user_id, timer_msg.message_id)
+        
+        timer_msg = bot.send_message(user_id, f"⏰ الوقت المتبقي: {int(data['time_per_question'])} ثانية")
+        data["current_message_id"] = timer_msg.message_id
+        
+        # بدء المؤقت في خيط منفصل
+        timer_thread = threading.Thread(target=start_timer, args=(user_id, data["time_per_question"]))
+        timer_thread.daemon = True
+        timer_thread.start()
+    
+    # إرسال السؤال
     if q["type"] == "mcq":
         markup = InlineKeyboardMarkup(row_width=2)
         buttons = []
         for opt in q["options"]:
             buttons.append(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
         markup.add(*buttons)
-        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}{time_msg}", reply_markup=markup)
+        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
     elif q["type"] == "truefalse":
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ صح", callback_data="ans_صح"), InlineKeyboardButton("❌ خطأ", callback_data="ans_خطأ"))
-        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}{time_msg}", reply_markup=markup)
+        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
     else:
-        msg = bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}{time_msg}\n\nأجب كتابياً:")
+        msg = bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}\n\nأجب كتابياً:")
         bot.register_next_step_handler(msg, process_essay, user_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("ans_"))
@@ -408,13 +454,16 @@ def answer_callback(call):
         bot.answer_callback_query(call.id, "انتهت الجلسة")
         return
     
-    # التحقق من الوقت
-    if data["time_per_question"] > 0:
-        elapsed = time.time() - data["question_start_time"]
-        if elapsed > data["time_per_question"]:
-            bot.answer_callback_query(call.id, "انتهى وقت هذا السؤال!")
-            finish_exam(user_id)
-            return
+    # إيقاف المؤقت
+    data["timer_active"] = False
+    
+    # حذف رسالة المؤقت
+    if data["current_message_id"]:
+        try:
+            bot.delete_message(user_id, data["current_message_id"])
+        except:
+            pass
+        data["current_message_id"] = None
     
     idx = data["index"]
     q = data["questions"][idx]
@@ -434,7 +483,6 @@ def answer_callback(call):
     data["user_ans"].append(answer)
     data["scores"].append({"score": score, "percentage": percentage})
     data["index"] += 1
-    data["question_start_time"] = time.time()
     
     bot.answer_callback_query(call.id)
     bot.delete_message(user_id, call.message.message_id)
@@ -449,13 +497,16 @@ def process_essay(message, user_id):
     if not data:
         return
     
-    # التحقق من الوقت
-    if data["time_per_question"] > 0:
-        elapsed = time.time() - data["question_start_time"]
-        if elapsed > data["time_per_question"]:
-            bot.send_message(user_id, "⏰ انتهى وقت هذا السؤال!")
-            finish_exam(user_id)
-            return
+    # إيقاف المؤقت
+    data["timer_active"] = False
+    
+    # حذف رسالة المؤقت
+    if data["current_message_id"]:
+        try:
+            bot.delete_message(user_id, data["current_message_id"])
+        except:
+            pass
+        data["current_message_id"] = None
     
     idx = data["index"]
     q = data["questions"][idx]
@@ -466,7 +517,6 @@ def process_essay(message, user_id):
     data["user_ans"].append(answer)
     data["scores"].append({"score": essay_score, "percentage": essay_percentage})
     data["index"] += 1
-    data["question_start_time"] = time.time()
     
     bot.send_message(user_id, f"📊 تصحيح السؤال {idx+1}:\nالنتيجة: {essay_score:.1f}/{1} ({essay_percentage:.0f}%)\nالإجابة الصحيحة: {correct}")
     
@@ -519,7 +569,7 @@ def share_result(call):
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, f"🎉 حصلت على نتيجة {percentage}% في اختبار @ZeQuiz_Bot!\n\nشاركها مع أصدقائك: https://t.me/{bot.get_me().username}")
 
-# ========== 4. إنشاء اختبار (مع إضافة الوقت الكلي) ==========
+# ========== 4. إنشاء اختبار ==========
 temp_exam = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_exam")
