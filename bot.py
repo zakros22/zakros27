@@ -51,7 +51,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS exams (
     link_code TEXT UNIQUE,
     created_by INTEGER,
     created_at TEXT,
-    total_time INTEGER DEFAULT 0
+    time_per_question INTEGER DEFAULT 0
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -76,26 +76,26 @@ c.execute('''CREATE TABLE IF NOT EXISTS referrals (
 )''')
 conn.commit()
 
-def add_exam(title, questions, answers, created_by, total_time):
+def add_exam(title, questions, answers, created_by, time_per_question):
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at, total_time) VALUES (?,?,?,?,?,?,?)",
-              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat(), total_time))
+    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at, time_per_question) VALUES (?,?,?,?,?,?,?)",
+              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat(), time_per_question))
     conn.commit()
     return c.lastrowid, code
 
 def get_exam_by_code(code):
-    c.execute("SELECT id, title, questions, answers, created_by, total_time FROM exams WHERE link_code=?", (code,))
+    c.execute("SELECT id, title, questions, answers, created_by, time_per_question FROM exams WHERE link_code=?", (code,))
     row = c.fetchone()
     if row:
-        return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4], "total_time": row[5]}
+        return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4], "time_per_question": row[5]}
     return None
 
 def get_exams_by_user(user_id):
-    c.execute("SELECT id, title, link_code, created_at, total_time FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
+    c.execute("SELECT id, title, link_code, created_at, time_per_question FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
     return c.fetchall()
 
 def get_all_exams_by_teacher(teacher_id):
-    c.execute("SELECT id, title, link_code, created_at, total_time FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
+    c.execute("SELECT id, title, link_code, created_at, time_per_question FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
     return c.fetchall()
 
 def save_result(exam_id, student_id, score, total, percentage, details):
@@ -246,6 +246,7 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.cell(0, 10, advice_text, 0, 1, 'C')
     pdf.ln(10)
     
+    # مربع حقوق البوت
     pdf.set_fill_color(230, 240, 255)
     pdf.rect(50, 230, 110, 25, 'F')
     pdf.set_draw_color(0, 102, 204)
@@ -312,11 +313,9 @@ def my_exams(call):
         bot.send_message(user_id, "📭 لم تقم بإنشاء أي اختبارات بعد.")
         return
     txt = "📋 قائمة الاختبارات التي أنشأتها:\n\n"
-    for eid, title, code, created_at, total_time in exams:
-        minutes = total_time // 60
-        seconds = total_time % 60
-        time_text = f"{minutes} دقيقة {seconds} ثانية" if total_time > 0 else "بدون وقت محدد"
-        txt += f"• {title}\n   رمز: {code}\n   الوقت الكلي: {time_text}\n   تاريخ: {created_at[:19]}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+    for eid, title, code, created_at, time_per_question in exams:
+        time_text = f"{time_per_question} ثانية لكل سؤال" if time_per_question > 0 else "بدون وقت محدد"
+        txt += f"• {title}\n   رمز: {code}\n   الوقت: {time_text}\n   تاريخ: {created_at[:19]}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
     bot.send_message(user_id, txt)
 
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
@@ -333,12 +332,6 @@ def process_exam_code(message):
         bot.send_message(user_id, "❌ رمز الاختبار غير صحيح.")
         return
     
-    total_questions = len(exam["questions"])
-    if exam["total_time"] > 0 and total_questions > 0:
-        time_per_question = exam["total_time"] / total_questions
-    else:
-        time_per_question = 0
-    
     user_answers[user_id] = {
         "exam_id": exam["id"],
         "title": exam["title"],
@@ -347,7 +340,7 @@ def process_exam_code(message):
         "user_ans": [],
         "scores": [],
         "index": 0,
-        "time_per_question": time_per_question,
+        "time_per_question": exam["time_per_question"],
         "timer_active": False,
         "timer_thread": None,
         "current_message_id": None
@@ -371,7 +364,6 @@ def start_timer(user_id, duration):
         if remaining <= 0:
             break
         
-        # تحديث رسالة المؤقت
         if data["current_message_id"]:
             try:
                 bot.edit_message_text(
@@ -384,16 +376,13 @@ def start_timer(user_id, duration):
         time.sleep(1)
     
     if data["timer_active"]:
-        # انتهى الوقت
         data["timer_active"] = False
         bot.send_message(user_id, f"⏰ انتهى وقت السؤال {data['index'] + 1}! سيتم الانتقال للسؤال التالي.")
         
-        # تسجيل عدم الإجابة
         data["user_ans"].append("(لم يجب)")
         data["scores"].append({"score": 0, "percentage": 0})
         data["index"] += 1
         
-        # إخفاء رسالة المؤقت
         if data["current_message_id"]:
             try:
                 bot.delete_message(user_id, data["current_message_id"])
@@ -415,30 +404,27 @@ def send_question(user_id):
     
     q = data["questions"][idx]
     
-    # إرسال المؤقت أولاً
     if data["time_per_question"] > 0:
         timer_msg = bot.send_message(user_id, f"⏰ سيبدأ السؤال خلال 3 ثوان...")
         time.sleep(3)
         bot.delete_message(user_id, timer_msg.message_id)
         
-        timer_msg = bot.send_message(user_id, f"⏰ الوقت المتبقي: {int(data['time_per_question'])} ثانية")
+        timer_msg = bot.send_message(user_id, f"⏰ الوقت المتبقي: {data['time_per_question']} ثانية")
         data["current_message_id"] = timer_msg.message_id
         
-        # بدء المؤقت في خيط منفصل
         timer_thread = threading.Thread(target=start_timer, args=(user_id, data["time_per_question"]))
         timer_thread.daemon = True
         timer_thread.start()
     
-    # إرسال السؤال
     if q["type"] == "mcq":
-        markup = InlineKeyboardMarkup(row_width=2)
+        markup = InlineKeyboardMarkup(row_width=1)
         buttons = []
         for opt in q["options"]:
             buttons.append(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
         markup.add(*buttons)
         bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
     elif q["type"] == "truefalse":
-        markup = InlineKeyboardMarkup()
+        markup = InlineKeyboardMarkup(row_width=2)
         markup.add(InlineKeyboardButton("✅ صح", callback_data="ans_صح"), InlineKeyboardButton("❌ خطأ", callback_data="ans_خطأ"))
         bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
     else:
@@ -454,10 +440,8 @@ def answer_callback(call):
         bot.answer_callback_query(call.id, "انتهت الجلسة")
         return
     
-    # إيقاف المؤقت
     data["timer_active"] = False
     
-    # حذف رسالة المؤقت
     if data["current_message_id"]:
         try:
             bot.delete_message(user_id, data["current_message_id"])
@@ -497,10 +481,8 @@ def process_essay(message, user_id):
     if not data:
         return
     
-    # إيقاف المؤقت
     data["timer_active"] = False
     
-    # حذف رسالة المؤقت
     if data["current_message_id"]:
         try:
             bot.delete_message(user_id, data["current_message_id"])
@@ -587,19 +569,19 @@ def create_exam_start(call):
 def process_title(message):
     user_id = message.chat.id
     temp_exam[user_id]["title"] = message.text.strip()
-    temp_exam[user_id]["step"] = "total_time"
-    bot.send_message(user_id, "⏰ أرسل الوقت الكلي للاختبار (بالثواني)\nمثال: 120 (أي دقيقتين للاختبار كاملاً)\nأو أرسل 0 إذا لا يوجد وقت محدد:")
+    temp_exam[user_id]["step"] = "time_per_question"
+    bot.send_message(user_id, "⏰ أرسل الوقت المخصص لكل سؤال (بالثواني)\nمثال: 30 (أي 30 ثانية لكل سؤال)\nأو أرسل 0 إذا لا يوجد وقت محدد:")
 
-@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "total_time")
-def process_total_time(message):
+@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "time_per_question")
+def process_time_per_question(message):
     user_id = message.chat.id
     try:
-        total_time = int(message.text.strip())
-        temp_exam[user_id]["total_time"] = total_time
+        time_per_question = int(message.text.strip())
+        temp_exam[user_id]["time_per_question"] = time_per_question
         temp_exam[user_id]["step"] = "question"
         bot.send_message(user_id, "➕ أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (mcq/truefalse/text):\nمثال:\nما عاصمة فرنسا؟\ntext")
     except:
-        bot.send_message(user_id, "❌ أرسل رقماً صحيحاً (بالثواني). مثال: 120")
+        bot.send_message(user_id, "❌ أرسل رقماً صحيحاً (بالثواني). مثال: 30")
 
 @bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "question")
 def process_question(message):
@@ -616,7 +598,7 @@ def process_question(message):
     temp_exam[user_id]["current_q"] = {"text": q_text, "type": q_type}
     if q_type == "mcq":
         temp_exam[user_id]["step"] = "mcq_options"
-        bot.send_message(user_id, "📋 أرسل الخيارات مفصولة بفواصل (مثال: باريس, لندن, برلين, مدريد):")
+        bot.send_message(user_id, "📋 أرسل خيارات السؤال (كل خيار في سطر منفرد):\nمثال:\nخيار 1\nخيار 2\nخيار 3")
     elif q_type == "truefalse":
         temp_exam[user_id]["step"] = "truefalse_answer"
         bot.send_message(user_id, "✅ أرسل الإجابة الصحيحة (صح أو خطأ):")
@@ -627,10 +609,16 @@ def process_question(message):
 @bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "mcq_options")
 def process_mcq_options(message):
     user_id = message.chat.id
-    opts = [opt.strip() for opt in message.text.split(',')]
+    # قراءة الخيارات من الأسطر (كل سطر = خيار)
+    opts = [line.strip() for line in message.text.strip().split('\n') if line.strip()]
+    if len(opts) < 2:
+        bot.send_message(user_id, "❌ يجب إدخال خيارين على الأقل (كل خيار في سطر منفرد).")
+        return
     temp_exam[user_id]["current_q"]["options"] = opts
     temp_exam[user_id]["step"] = "mcq_answer"
-    bot.send_message(user_id, f"الخيارات: {', '.join(opts)}\nأرسل الإجابة الصحيحة (نص الخيار بالضبط):")
+    # عرض الخيارات للمستخدم
+    options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(opts)])
+    bot.send_message(user_id, f"الخيارات:\n{options_text}\n\nأرسل نص الإجابة الصحيحة (كما هو مكتوب بالضبط):")
 
 @bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "mcq_answer")
 def process_mcq_answer(message):
@@ -691,15 +679,12 @@ def finish_creation(call):
     
     update_points(user_id, -1)
     data = temp_exam.pop(user_id)
-    total_seconds = data["total_time"]
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
-    time_text = f"{minutes} دقيقة {seconds} ثانية" if total_seconds > 0 else "بدون وقت محدد"
+    time_text = f"{data['time_per_question']} ثانية لكل سؤال" if data["time_per_question"] > 0 else "بدون وقت محدد"
     
-    eid, code = add_exam(data["title"], data["questions"], data["answers"], user_id, data["total_time"])
+    eid, code = add_exam(data["title"], data["questions"], data["answers"], user_id, data["time_per_question"])
     new_user = get_user(user_id)
     
-    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n⏰ الوقت الكلي للاختبار: {time_text}\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_user['points']:.2f}", user_id, call.message.message_id)
+    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n⏰ الوقت لكل سؤال: {time_text}\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_user['points']:.2f}", user_id, call.message.message_id)
 
 # ========== 5. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
@@ -724,13 +709,11 @@ def admin_all_exams(call):
         bot.send_message(OWNER_ID, "لا توجد اختبارات حتى الآن.")
         return
     txt = "📋 قائمة جميع الاختبارات التي أنشأتها:\n\n"
-    for eid, title, code, created_at, total_time in exams:
-        minutes = total_time // 60
-        seconds = total_time % 60
-        time_text = f"{minutes} دقيقة {seconds} ثانية" if total_time > 0 else "بدون وقت"
+    for eid, title, code, created_at, time_per_question in exams:
+        time_text = f"{time_per_question} ثانية لكل سؤال" if time_per_question > 0 else "بدون وقت"
         c.execute("SELECT COUNT(*) FROM results WHERE exam_id=?", (eid,))
         participants = c.fetchone()[0]
-        txt += f"• {title}\n   رمز: {code}\n   الوقت الكلي: {time_text}\n   تاريخ: {created_at[:19]}\n   عدد المشاركين: {participants}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+        txt += f"• {title}\n   رمز: {code}\n   الوقت: {time_text}\n   تاريخ: {created_at[:19]}\n   عدد المشاركين: {participants}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
     bot.send_message(OWNER_ID, txt)
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_points")
