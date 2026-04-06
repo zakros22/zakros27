@@ -254,30 +254,12 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     pdf.set_text_color(100, 100, 100)
     advice_text = reshape_arabic(advice)
     pdf.cell(0, 10, advice_text, 0, 1, 'C')
-    pdf.ln(10)
+    pdf.ln(15)
     
-    # مربع حقوق البوت
-    pdf.set_fill_color(230, 240, 255)
-    pdf.rect(40, 220, 130, 35, 'F')
-    pdf.set_draw_color(0, 102, 204)
-    pdf.rect(40, 220, 130, 35)
-    
-    if FONT_PATH:
-        pdf.set_font('Noto', '', 10)
-    else:
-        pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(0, 51, 102)
-    pdf.set_xy(45, 228)
-    created_text = reshape_arabic("صُنع بواسطة")
-    pdf.cell(120, 8, created_text, 0, 1, 'C')
-    
-    if FONT_PATH:
-        pdf.set_font('Noto', '', 11)
-    else:
-        pdf.set_font("Helvetica", "B", 11)
-    pdf.set_xy(45, 238)
-    bot_text = reshape_arabic("@ZeQuiz_Bot")
-    pdf.cell(120, 8, bot_text, 0, 1, 'C')
+    # حقوق البوت كنص عادي
+    pdf.set_font_size(10)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 8, "@ZeQuiz_Bot", 0, 1, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
@@ -353,7 +335,6 @@ def show_results(call):
     user_id = call.message.chat.id
     exam_id = int(call.data.split("_")[2])
     
-    # التحقق من أن المستخدم هو منشئ الاختبار
     c.execute("SELECT created_by, title FROM exams WHERE id=?", (exam_id,))
     exam = c.fetchone()
     if not exam or exam[0] != user_id:
@@ -382,19 +363,22 @@ def share_exam_channel(call):
         return
     
     bot.answer_callback_query(call.id)
+    
+    direct_link = f"https://t.me/{bot.get_me().username}?start=exam_{code}"
+    
     bot.send_message(user_id,
         f"📢 لمشاركة الاختبار في قناة تلغرام:\n\n"
         f"1. أضف البوت @{bot.get_me().username} أدمن في قناتك\n"
-        f"2. استخدم الرابط التالي:\n"
-        f"🔗 https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
-        f"يمكنك أيضاً مشاركة هذا النص في قناتك:\n"
+        f"2. انسخ الرابط التالي وأرسله في قناتك:\n"
+        f"{direct_link}\n\n"
+        f"📝 نص جاهز للنشر في القناة:\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎓 *اختبار: {exam['title']}*\n\n"
+        f"🎓 اختبار: {exam['title']}\n\n"
         f"📝 اختبر معلوماتك الآن!\n"
-        f"🔗 [اضغط هنا للدخول للاختبار](https://t.me/{bot.get_me().username}?start=exam_{code})\n\n"
-        f"📌 @ZeQuiz_Bot\n"
+        f"{direct_link}\n\n"
+        f"@ZeQuiz_Bot\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        parse_mode="Markdown", disable_web_page_preview=True)
+        disable_web_page_preview=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
 def enter_exam(call):
@@ -804,7 +788,7 @@ def finish_creation(call):
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
 def admin_panel(call):
     if call.message.chat.id != OWNER_ID:
-        bot.answer_callback_query(call.id, "غير مصرح")
+        bot.answer_callback_query(call.id, "غير مصرح", True)
         return
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("➕ إضافة نقاط لمستخدم", callback_data="admin_add_points"))
@@ -831,7 +815,7 @@ def send_broadcast(message):
     fail = 0
     for (uid,) in users:
         try:
-            bot.send_message(uid, f"📢 *إذاعة من المالك:*\n\n{broadcast_text}\n\n📌 @ZeQuiz_Bot", parse_mode="Markdown")
+            bot.send_message(uid, f"📢 إذاعة من المالك:\n\n{broadcast_text}\n\n@ZeQuiz_Bot")
             success += 1
         except:
             fail += 1
@@ -925,7 +909,7 @@ def show_results_by_code(message):
         txt += f"👤 {student_name}\n   🎯 {score:.1f}/{total} ({pct:.1f}%)\n   📅 {date[:16]}\n\n"
     bot.send_message(OWNER_ID, txt)
 
-# معالجة الروابط المباشرة
+# معالجة الروابط المباشرة للاختبارات
 @bot.message_handler(func=lambda m: m.text and m.text.startswith("https://t.me/") and "start=exam_" in m.text)
 def handle_exam_link(message):
     code = message.text.split("start=exam_")[1].split()[0]
