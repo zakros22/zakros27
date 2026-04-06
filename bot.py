@@ -51,7 +51,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS exams (
     link_code TEXT UNIQUE,
     created_by INTEGER,
     created_at TEXT,
-    time_per_question INTEGER DEFAULT 0
+    time_per_question INTEGER DEFAULT 0,
+    results_link TEXT UNIQUE
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -63,6 +64,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     exam_id INTEGER,
     student_id INTEGER,
+    student_name TEXT,
     score REAL,
     total REAL,
     percentage REAL,
@@ -78,34 +80,42 @@ conn.commit()
 
 def add_exam(title, questions, answers, created_by, time_per_question):
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at, time_per_question) VALUES (?,?,?,?,?,?,?)",
-              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat(), time_per_question))
+    results_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at, time_per_question, results_link) VALUES (?,?,?,?,?,?,?,?)",
+              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat(), time_per_question, results_code))
     conn.commit()
-    return c.lastrowid, code
+    return c.lastrowid, code, results_code
 
 def get_exam_by_code(code):
-    c.execute("SELECT id, title, questions, answers, created_by, time_per_question FROM exams WHERE link_code=?", (code,))
+    c.execute("SELECT id, title, questions, answers, created_by, time_per_question, results_link FROM exams WHERE link_code=?", (code,))
     row = c.fetchone()
     if row:
-        return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4], "time_per_question": row[5]}
+        return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4], "time_per_question": row[5], "results_link": row[6]}
     return None
 
+def get_exam_by_results_link(results_link):
+    c.execute("SELECT id, title, created_by FROM exams WHERE results_link=?", (results_link,))
+    row = c.fetchone()
+    if row:
+        return {"id": row[0], "title": row[1], "created_by": row[2]}
+    return None
+
+def get_results_by_exam_id(exam_id):
+    c.execute("SELECT student_id, student_name, score, total, percentage, date FROM results WHERE exam_id=? ORDER BY percentage DESC", (exam_id,))
+    return c.fetchall()
+
 def get_exams_by_user(user_id):
-    c.execute("SELECT id, title, link_code, created_at, time_per_question FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
+    c.execute("SELECT id, title, link_code, created_at, time_per_question, results_link FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
     return c.fetchall()
 
 def get_all_exams_by_teacher(teacher_id):
-    c.execute("SELECT id, title, link_code, created_at, time_per_question FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
+    c.execute("SELECT id, title, link_code, created_at, time_per_question, results_link FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
     return c.fetchall()
 
-def save_result(exam_id, student_id, score, total, percentage, details):
-    c.execute("INSERT INTO results (exam_id, student_id, score, total, percentage, details, date) VALUES (?,?,?,?,?,?,?)",
-              (exam_id, student_id, score, total, percentage, json.dumps(details), datetime.now().isoformat()))
+def save_result(exam_id, student_id, student_name, score, total, percentage, details):
+    c.execute("INSERT INTO results (exam_id, student_id, student_name, score, total, percentage, details, date) VALUES (?,?,?,?,?,?,?,?)",
+              (exam_id, student_id, student_name, score, total, percentage, json.dumps(details), datetime.now().isoformat()))
     conn.commit()
-
-def get_results_by_exam(exam_id):
-    c.execute("SELECT student_id, score, total, percentage FROM results WHERE exam_id=?", (exam_id,))
-    return c.fetchall()
 
 def get_user(user_id):
     c.execute("SELECT points, total_shares FROM users WHERE user_id=?", (user_id,))
@@ -248,18 +258,26 @@ def generate_certificate(user_id, exam_title, score, total, percentage):
     
     # مربع حقوق البوت
     pdf.set_fill_color(230, 240, 255)
-    pdf.rect(50, 230, 110, 25, 'F')
+    pdf.rect(40, 220, 130, 35, 'F')
     pdf.set_draw_color(0, 102, 204)
-    pdf.rect(50, 230, 110, 25)
+    pdf.rect(40, 220, 130, 35)
+    
+    if FONT_PATH:
+        pdf.set_font('Noto', '', 10)
+    else:
+        pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(0, 51, 102)
+    pdf.set_xy(45, 228)
+    created_text = reshape_arabic("صُنع بواسطة")
+    pdf.cell(120, 8, created_text, 0, 1, 'C')
     
     if FONT_PATH:
         pdf.set_font('Noto', '', 11)
     else:
         pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(0, 51, 102)
-    pdf.set_xy(55, 238)
+    pdf.set_xy(45, 238)
     bot_text = reshape_arabic("@ZeQuiz_Bot")
-    pdf.cell(100, 10, bot_text, 0, 1, 'C')
+    pdf.cell(120, 8, bot_text, 0, 1, 'C')
     
     path = tempfile.mktemp(suffix='.pdf')
     pdf.output(path)
@@ -312,11 +330,71 @@ def my_exams(call):
     if not exams:
         bot.send_message(user_id, "📭 لم تقم بإنشاء أي اختبارات بعد.")
         return
-    txt = "📋 قائمة الاختبارات التي أنشأتها:\n\n"
-    for eid, title, code, created_at, time_per_question in exams:
+    
+    for eid, title, code, created_at, time_per_question, results_link in exams:
         time_text = f"{time_per_question} ثانية لكل سؤال" if time_per_question > 0 else "بدون وقت محدد"
-        txt += f"• {title}\n   رمز: {code}\n   الوقت: {time_text}\n   تاريخ: {created_at[:19]}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
-    bot.send_message(user_id, txt)
+        results_url = f"https://t.me/{bot.get_me().username}?start=results_{results_link}"
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📊 عرض النتائج", callback_data=f"show_results_{eid}"))
+        markup.add(InlineKeyboardButton("📢 مشاركة في قناة", callback_data=f"share_exam_{code}"))
+        markup.add(InlineKeyboardButton("🔗 رابط الاختبار", url=f"https://t.me/{bot.get_me().username}?start=exam_{code}"))
+        
+        bot.send_message(user_id,
+            f"📋 *{title}*\n\n"
+            f"🆔 رمز الاختبار: `{code}`\n"
+            f"⏰ الوقت: {time_text}\n"
+            f"📅 التاريخ: {created_at[:19]}\n"
+            f"📊 رابط النتائج: [اضغط هنا]({results_url})",
+            parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("show_results_"))
+def show_results(call):
+    user_id = call.message.chat.id
+    exam_id = int(call.data.split("_")[2])
+    
+    # التحقق من أن المستخدم هو منشئ الاختبار
+    c.execute("SELECT created_by, title FROM exams WHERE id=?", (exam_id,))
+    exam = c.fetchone()
+    if not exam or exam[0] != user_id:
+        bot.answer_callback_query(call.id, "غير مصرح لك بعرض نتائج هذا الاختبار.", True)
+        return
+    
+    results = get_results_by_exam_id(exam_id)
+    if not results:
+        bot.send_message(user_id, f"📊 لا توجد نتائج لاختبار {exam[1]} بعد.")
+        return
+    
+    txt = f"📊 *نتائج اختبار {exam[1]}*\n\n"
+    for student_id, student_name, score, total, percentage, date in results:
+        name = student_name if student_name else f"مستخدم {student_id}"
+        txt += f"👤 {name}\n   🎯 {score:.1f}/{total} ({percentage:.1f}%)\n   📅 {date[:16]}\n\n"
+    
+    bot.send_message(user_id, txt, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("share_exam_"))
+def share_exam_channel(call):
+    user_id = call.message.chat.id
+    code = call.data.split("_")[2]
+    exam = get_exam_by_code(code)
+    if not exam or exam["created_by"] != user_id:
+        bot.answer_callback_query(call.id, "غير مصرح.", True)
+        return
+    
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id,
+        f"📢 لمشاركة الاختبار في قناة تلغرام:\n\n"
+        f"1. أضف البوت @{bot.get_me().username} أدمن في قناتك\n"
+        f"2. استخدم الرابط التالي:\n"
+        f"🔗 https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+        f"يمكنك أيضاً مشاركة هذا النص في قناتك:\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎓 *اختبار: {exam['title']}*\n\n"
+        f"📝 اختبر معلوماتك الآن!\n"
+        f"🔗 [اضغط هنا للدخول للاختبار](https://t.me/{bot.get_me().username}?start=exam_{code})\n\n"
+        f"📌 @ZeQuiz_Bot\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        parse_mode="Markdown", disable_web_page_preview=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
 def enter_exam(call):
@@ -332,6 +410,14 @@ def process_exam_code(message):
         bot.send_message(user_id, "❌ رمز الاختبار غير صحيح.")
         return
     
+    # طلب اسم المستخدم
+    msg = bot.send_message(user_id, "📝 أرسل اسمك (سيظهر في الشهادة والنتائج):")
+    bot.register_next_step_handler(msg, process_student_name, exam)
+
+def process_student_name(message, exam):
+    user_id = message.chat.id
+    student_name = message.text.strip()
+    
     user_answers[user_id] = {
         "exam_id": exam["id"],
         "title": exam["title"],
@@ -343,14 +429,14 @@ def process_exam_code(message):
         "time_per_question": exam["time_per_question"],
         "timer_active": False,
         "timer_thread": None,
-        "current_message_id": None
+        "current_message_id": None,
+        "student_name": student_name
     }
     send_question(user_id)
 
 user_answers = {}
 
 def start_timer(user_id, duration):
-    """بدء مؤقت تنازلي للسؤال"""
     data = user_answers.get(user_id)
     if not data:
         return
@@ -525,7 +611,7 @@ def finish_exam(user_id):
             "percentage": score_info["percentage"]
         })
     
-    save_result(data["exam_id"], user_id, total_score, total, percentage, details)
+    save_result(data["exam_id"], user_id, data["student_name"], total_score, total, percentage, details)
     
     grade_msg, advice, _ = get_grade_message(percentage)
     bot.send_message(user_id, f"🎉 انتهى الاختبار!\nالنتيجة النهائية: {total_score:.1f}/{total} ({percentage:.1f}%)\n\n{grade_msg}\n{advice}")
@@ -550,6 +636,27 @@ def share_result(call):
     percentage = parts[3]
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, f"🎉 حصلت على نتيجة {percentage}% في اختبار @ZeQuiz_Bot!\n\nشاركها مع أصدقائك: https://t.me/{bot.get_me().username}")
+
+# معالجة رابط النتائج
+@bot.message_handler(func=lambda m: m.text and m.text.startswith("https://t.me/") and "start=results_" in m.text)
+def handle_results_link(message):
+    results_code = message.text.split("start=results_")[1].split()[0]
+    exam = get_exam_by_results_link(results_code)
+    if not exam:
+        bot.send_message(message.chat.id, "❌ رابط غير صحيح.")
+        return
+    
+    results = get_results_by_exam_id(exam["id"])
+    if not results:
+        bot.send_message(message.chat.id, f"📊 لا توجد نتائج لاختبار {exam['title']} بعد.")
+        return
+    
+    txt = f"📊 *نتائج اختبار {exam['title']}*\n\n"
+    for student_id, student_name, score, total, percentage, date in results:
+        name = student_name if student_name else f"مستخدم {student_id}"
+        txt += f"👤 {name}\n   🎯 {score:.1f}/{total} ({percentage:.1f}%)\n   📅 {date[:16]}\n\n"
+    
+    bot.send_message(message.chat.id, txt, parse_mode="Markdown")
 
 # ========== 4. إنشاء اختبار ==========
 temp_exam = {}
@@ -609,14 +716,12 @@ def process_question(message):
 @bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "mcq_options")
 def process_mcq_options(message):
     user_id = message.chat.id
-    # قراءة الخيارات من الأسطر (كل سطر = خيار)
     opts = [line.strip() for line in message.text.strip().split('\n') if line.strip()]
     if len(opts) < 2:
         bot.send_message(user_id, "❌ يجب إدخال خيارين على الأقل (كل خيار في سطر منفرد).")
         return
     temp_exam[user_id]["current_q"]["options"] = opts
     temp_exam[user_id]["step"] = "mcq_answer"
-    # عرض الخيارات للمستخدم
     options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(opts)])
     bot.send_message(user_id, f"الخيارات:\n{options_text}\n\nأرسل نص الإجابة الصحيحة (كما هو مكتوب بالضبط):")
 
@@ -681,10 +786,19 @@ def finish_creation(call):
     data = temp_exam.pop(user_id)
     time_text = f"{data['time_per_question']} ثانية لكل سؤال" if data["time_per_question"] > 0 else "بدون وقت محدد"
     
-    eid, code = add_exam(data["title"], data["questions"], data["answers"], user_id, data["time_per_question"])
+    eid, code, results_code = add_exam(data["title"], data["questions"], data["answers"], user_id, data["time_per_question"])
     new_user = get_user(user_id)
+    results_url = f"https://t.me/{bot.get_me().username}?start=results_{results_code}"
     
-    bot.edit_message_text(f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n⏰ الوقت لكل سؤال: {time_text}\n🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\nرمز الاختبار: {code}\nعدد الأسئلة: {len(data['questions'])}\n\n⭐ النقاط المتبقية: {new_user['points']:.2f}", user_id, call.message.message_id)
+    bot.edit_message_text(
+        f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n"
+        f"⏰ الوقت لكل سؤال: {time_text}\n"
+        f"🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
+        f"📊 رابط النتائج (مشاركة مع الطلاب):\n{results_url}\n\n"
+        f"🆔 رمز الاختبار: `{code}`\n"
+        f"📋 عدد الأسئلة: {len(data['questions'])}\n\n"
+        f"⭐ النقاط المتبقية: {new_user['points']:.2f}",
+        user_id, call.message.message_id, parse_mode="Markdown", disable_web_page_preview=True)
 
 # ========== 5. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
@@ -698,7 +812,31 @@ def admin_panel(call):
     markup.add(InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats"))
     markup.add(InlineKeyboardButton("📋 قائمة جميع الاختبارات", callback_data="admin_all_exams"))
     markup.add(InlineKeyboardButton("📈 نتائج اختبار", callback_data="admin_results"))
+    markup.add(InlineKeyboardButton("📢 إذاعة للجميع", callback_data="admin_broadcast"))
     bot.send_message(OWNER_ID, "🔧 لوحة تحكم المالك", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_broadcast")
+def admin_broadcast(call):
+    if call.message.chat.id != OWNER_ID:
+        bot.answer_callback_query(call.id, "غير مصرح", True)
+        return
+    msg = bot.send_message(OWNER_ID, "📢 أرسل الرسالة التي تريد إذاعتها لجميع مستخدمي البوت:")
+    bot.register_next_step_handler(msg, send_broadcast)
+
+def send_broadcast(message):
+    broadcast_text = message.text
+    c.execute("SELECT user_id FROM users")
+    users = c.fetchall()
+    success = 0
+    fail = 0
+    for (uid,) in users:
+        try:
+            bot.send_message(uid, f"📢 *إذاعة من المالك:*\n\n{broadcast_text}\n\n📌 @ZeQuiz_Bot", parse_mode="Markdown")
+            success += 1
+        except:
+            fail += 1
+        time.sleep(0.05)
+    bot.send_message(OWNER_ID, f"✅ تم إرسال الإذاعة إلى {success} مستخدم.\n❌ فشل الإرسال إلى {fail} مستخدم.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_all_exams")
 def admin_all_exams(call):
@@ -709,7 +847,7 @@ def admin_all_exams(call):
         bot.send_message(OWNER_ID, "لا توجد اختبارات حتى الآن.")
         return
     txt = "📋 قائمة جميع الاختبارات التي أنشأتها:\n\n"
-    for eid, title, code, created_at, time_per_question in exams:
+    for eid, title, code, created_at, time_per_question, results_link in exams:
         time_text = f"{time_per_question} ثانية لكل سؤال" if time_per_question > 0 else "بدون وقت"
         c.execute("SELECT COUNT(*) FROM results WHERE exam_id=?", (eid,))
         participants = c.fetchone()[0]
@@ -769,21 +907,22 @@ def admin_results(call):
     if call.message.chat.id != OWNER_ID:
         return
     msg = bot.send_message(OWNER_ID, "أرسل رمز الاختبار (مثال: ABC123):")
-    bot.register_next_step_handler(msg, show_results)
+    bot.register_next_step_handler(msg, show_results_by_code)
 
-def show_results(message):
+def show_results_by_code(message):
     code = message.text.strip().upper()
     exam = get_exam_by_code(code)
     if not exam:
         bot.send_message(OWNER_ID, "❌ رمز غير صحيح.")
         return
-    results = get_results_by_exam(exam["id"])
+    results = get_results_by_exam_id(exam["id"])
     if not results:
         bot.send_message(OWNER_ID, f"لا توجد نتائج لاختبار {exam['title']}.")
         return
     txt = f"📈 نتائج اختبار {exam['title']}\n\n"
-    for sid, score, total, pct in results:
-        txt += f"👤 مستخدم {sid}: {score:.1f}/{total} ({pct:.1f}%)\n"
+    for sid, name, score, total, pct, date in results:
+        student_name = name if name else f"مستخدم {sid}"
+        txt += f"👤 {student_name}\n   🎯 {score:.1f}/{total} ({pct:.1f}%)\n   📅 {date[:16]}\n\n"
     bot.send_message(OWNER_ID, txt)
 
 # معالجة الروابط المباشرة
@@ -794,7 +933,9 @@ def handle_exam_link(message):
     if not exam:
         bot.send_message(message.chat.id, "❌ رابط غير صحيح.")
         return
-    start_exam(message.chat.id, exam)
+    
+    msg = bot.send_message(message.chat.id, "📝 أرسل اسمك (سيظهر في الشهادة والنتائج):")
+    bot.register_next_step_handler(msg, process_student_name, exam)
 
 if __name__ == "__main__":
     print("✅ البوت يعمل...")
