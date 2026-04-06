@@ -3,18 +3,10 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import sqlite3
 import json
-import tempfile
-import string
-import random
-from datetime import datetime
-import time
 import threading
-from fpdf import FPDF
-import difflib
-import re
-import requests
-import arabic_reshaper
-from bidi.algorithm import get_display
+import time
+from datetime import datetime, timedelta
+import tempfile
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -23,53 +15,36 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN)
 OWNER_ID = 7021542402
 
-# ========== 1. تحميل خط يدعم اللغة العربية ==========
-FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansArabic/NotoSansArabic-Regular.ttf"
-FONT_PATH = "NotoSansArabic-Regular.ttf"
-if not os.path.exists(FONT_PATH):
-    try:
-        r = requests.get(FONT_URL, timeout=30)
-        with open(FONT_PATH, "wb") as f:
-            f.write(r.content)
-    except:
-        FONT_PATH = None
-
-def reshape_arabic(text):
-    if any('\u0600' <= c <= '\u06FF' for c in text):
-        reshaped = arabic_reshaper.reshape(text)
-        return get_display(reshaped)
-    return text
-
-# ========== 2. قاعدة البيانات ==========
-conn = sqlite3.connect("exam.db", check_same_thread=False)
+# ========== 1. قاعدة البيانات ==========
+conn = sqlite3.connect("reminder_bot.db", check_same_thread=False)
 c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS exams (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    questions TEXT,
-    answers TEXT,
-    link_code TEXT UNIQUE,
-    created_by INTEGER,
-    created_at TEXT,
-    time_per_question INTEGER DEFAULT 0,
-    results_link TEXT UNIQUE
-)''')
 c.execute('''CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
-    name TEXT,
-    points REAL DEFAULT 2,
+    points INTEGER DEFAULT 10,
     total_shares INTEGER DEFAULT 0
 )''')
-c.execute('''CREATE TABLE IF NOT EXISTS results (
+c.execute('''CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id INTEGER,
-    student_id INTEGER,
-    student_name TEXT,
-    score REAL,
-    total REAL,
-    percentage REAL,
-    details TEXT,
-    date TEXT
+    user_id INTEGER,
+    channel_id TEXT,
+    duration_seconds INTEGER,
+    message TEXT,
+    media_type TEXT,
+    media_file_id TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT
+)''')
+c.execute('''CREATE TABLE IF NOT EXISTS repeats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    channel_id TEXT,
+    interval_seconds INTEGER,
+    end_time REAL,
+    message TEXT,
+    media_type TEXT,
+    media_file_id TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_at TEXT
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS referrals (
     referrer_id INTEGER,
@@ -78,52 +53,13 @@ c.execute('''CREATE TABLE IF NOT EXISTS referrals (
 )''')
 conn.commit()
 
-def add_exam(title, questions, answers, created_by, time_per_question):
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    results_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-    c.execute("INSERT INTO exams (title, questions, answers, link_code, created_by, created_at, time_per_question, results_link) VALUES (?,?,?,?,?,?,?,?)",
-              (title, json.dumps(questions), json.dumps(answers), code, created_by, datetime.now().isoformat(), time_per_question, results_code))
-    conn.commit()
-    return c.lastrowid, code, results_code
-
-def get_exam_by_code(code):
-    c.execute("SELECT id, title, questions, answers, created_by, time_per_question, results_link FROM exams WHERE link_code=?", (code,))
-    row = c.fetchone()
-    if row:
-        return {"id": row[0], "title": row[1], "questions": json.loads(row[2]), "answers": json.loads(row[3]), "created_by": row[4], "time_per_question": row[5], "results_link": row[6]}
-    return None
-
-def get_exam_by_results_link(results_link):
-    c.execute("SELECT id, title, created_by FROM exams WHERE results_link=?", (results_link,))
-    row = c.fetchone()
-    if row:
-        return {"id": row[0], "title": row[1], "created_by": row[2]}
-    return None
-
-def get_results_by_exam_id(exam_id):
-    c.execute("SELECT student_id, student_name, score, total, percentage, date FROM results WHERE exam_id=? ORDER BY percentage DESC", (exam_id,))
-    return c.fetchall()
-
-def get_exams_by_user(user_id):
-    c.execute("SELECT id, title, link_code, created_at, time_per_question, results_link FROM exams WHERE created_by=? ORDER BY created_at DESC", (user_id,))
-    return c.fetchall()
-
-def get_all_exams_by_teacher(teacher_id):
-    c.execute("SELECT id, title, link_code, created_at, time_per_question, results_link FROM exams WHERE created_by=? ORDER BY created_at DESC", (teacher_id,))
-    return c.fetchall()
-
-def save_result(exam_id, student_id, student_name, score, total, percentage, details):
-    c.execute("INSERT INTO results (exam_id, student_id, student_name, score, total, percentage, details, date) VALUES (?,?,?,?,?,?,?,?)",
-              (exam_id, student_id, student_name, score, total, percentage, json.dumps(details), datetime.now().isoformat()))
-    conn.commit()
-
 def get_user(user_id):
     c.execute("SELECT points, total_shares FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
     if not row:
-        c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 2, 0))
+        c.execute("INSERT INTO users (user_id, points, total_shares) VALUES (?,?,?)", (user_id, 10, 0))
         conn.commit()
-        return {"points": 2, "total_shares": 0}
+        return {"points": 10, "total_shares": 0}
     return {"points": row[0], "total_shares": row[1]}
 
 def update_points(user_id, delta):
@@ -134,136 +70,125 @@ def add_share(user_id):
     c.execute("UPDATE users SET total_shares = total_shares + 1 WHERE user_id=?", (user_id,))
     c.execute("SELECT total_shares FROM users WHERE user_id=?", (user_id,))
     shares = c.fetchone()[0]
-    points_from_shares = shares * 0.25
-    c.execute("UPDATE users SET points = ? WHERE user_id=?", (points_from_shares, user_id))
+    if shares % 1 == 0:
+        c.execute("UPDATE users SET points = points + 3 WHERE user_id=?", (user_id,))
     conn.commit()
 
 def add_referral(referrer_id, referred_id):
     c.execute("SELECT * FROM referrals WHERE referred_id=?", (referred_id,))
-    existing = c.fetchone()
-    if existing:
+    if c.fetchone():
         return False
     c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?,?,?)", 
               (referrer_id, referred_id, datetime.now().isoformat()))
-    update_points(referrer_id, 0.25)
+    update_points(referrer_id, 3)
     conn.commit()
     return True
 
-def calculate_essay_score(user_answer, correct_answer):
-    user_clean = user_answer.lower().strip()
-    correct_clean = correct_answer.lower().strip()
-    
-    if user_clean == correct_clean:
-        return 1.0, 100.0
-    
-    user_words = set(re.findall(r'\w+', user_clean))
-    correct_words = set(re.findall(r'\w+', correct_clean))
-    if correct_words:
-        word_match = len(user_words.intersection(correct_words)) / len(correct_words)
-    else:
-        word_match = 0
-    
-    char_match = difflib.SequenceMatcher(None, user_clean, correct_clean).ratio()
-    final_ratio = (word_match * 0.7) + (char_match * 0.3)
-    final_percentage = round(final_ratio * 100, 1)
-    
-    return round(final_ratio, 2), final_percentage
+# تخزين مؤقت للبيانات أثناء الإنشاء
+temp_data = {}
 
-def get_grade_message(percentage):
-    if percentage >= 90:
-        return ("ممتاز! 🏆", "أداء رائع، أنت متميز!", (0, 100, 0))
-    elif percentage >= 75:
-        return ("جيد جدا! 👍", "عمل ممتاز، واصل التميز!", (0, 100, 0))
-    elif percentage >= 60:
-        return ("جيد! 📚", "نتيجة جيدة، يمكنك التحسين!", (255, 165, 0))
-    elif percentage >= 50:
-        return ("مقبول! 📖", "تحتاج إلى مذاكرة أكثر قليلا", (255, 165, 0))
-    else:
-        return ("حظ أوفر! 💪", "لا تيأس، حاول مرة أخرى بعد المذاكرة", (255, 0, 0))
+# ========== 2. دوال المؤقتات ==========
+def format_time(seconds):
+    """تنسيق الوقت إلى ساعات:دقائق:ثواني"""
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
-def generate_certificate(user_id, exam_title, score, total, percentage):
-    pdf = FPDF()
-    pdf.add_page()
+def run_countdown_timer(user_id, duration_seconds, reminder_id, channel_id, message, media_type, media_file_id):
+    """تشغيل مؤقت تنازلي مع عرض الساعة"""
+    remaining = duration_seconds
+    last_message_id = None
     
-    if FONT_PATH and os.path.exists(FONT_PATH):
-        pdf.add_font('Noto', '', FONT_PATH, uni=True)
-        pdf.set_font('Noto', '', 20)
+    while remaining > 0:
+        # التحقق من أن المنبه لا يزال نشطاً
+        c.execute("SELECT is_active FROM reminders WHERE id=?", (reminder_id,))
+        row = c.fetchone()
+        if not row or row[0] == 0:
+            return
+        
+        time_str = format_time(remaining)
+        text = f"⏰ *الوقت المتبقي:*\n`{time_str}`"
+        
+        if last_message_id:
+            try:
+                bot.edit_message_text(text, user_id, last_message_id, parse_mode="Markdown")
+            except:
+                last_message_id = bot.send_message(user_id, text, parse_mode="Markdown").message_id
+        else:
+            last_message_id = bot.send_message(user_id, text, parse_mode="Markdown").message_id
+        
+        time.sleep(1)
+        remaining -= 1
+    
+    # حذف رسالة المؤقت
+    if last_message_id:
+        try:
+            bot.delete_message(user_id, last_message_id)
+        except:
+            pass
+    
+    # إرسال المحتوى عند انتهاء الوقت
+    if channel_id and channel_id != "None":
+        chat_id = channel_id
     else:
-        pdf.set_font("Helvetica", "", 20)
+        chat_id = user_id
     
-    pdf.set_text_color(0, 51, 102)
-    title_text = reshape_arabic("شهادة إتمام الاختبار")
-    pdf.cell(0, 25, title_text, 0, 1, 'C')
-    pdf.ln(5)
+    try:
+        if media_type == "photo":
+            bot.send_photo(chat_id, media_file_id, caption=message if message else "⏰ انتهى وقت المنبه!")
+        elif media_type == "document":
+            bot.send_document(chat_id, media_file_id, caption=message if message else "⏰ انتهى وقت المنبه!")
+        elif media_type == "video":
+            bot.send_video(chat_id, media_file_id, caption=message if message else "⏰ انتهى وقت المنبه!")
+        else:
+            bot.send_message(chat_id, message if message else "⏰ انتهى وقت المنبه!")
+    except Exception as e:
+        bot.send_message(user_id, f"❌ فشل إرسال المنبه: {e}")
     
-    pdf.set_draw_color(0, 102, 204)
-    pdf.line(30, 45, 180, 45)
+    # حذف المنبه من قاعدة البيانات
+    c.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+    conn.commit()
     
-    if FONT_PATH:
-        pdf.set_font('Noto', '', 12)
-    else:
-        pdf.set_font("Helvetica", "", 12)
-    pdf.set_text_color(0, 0, 0)
-    
-    student_text = reshape_arabic(f"الطالب/الطالبة رقم: {user_id}")
-    pdf.cell(0, 12, student_text, 0, 1, 'C')
-    
-    exam_text = reshape_arabic(f"الاختبار: {exam_title}")
-    pdf.cell(0, 12, exam_text, 0, 1, 'C')
-    
-    date_text = reshape_arabic(f"التاريخ: {datetime.now().strftime('%Y/%m/%d')}")
-    pdf.cell(0, 12, date_text, 0, 1, 'C')
-    pdf.ln(8)
-    
-    grade_msg, advice, color = get_grade_message(percentage)
-    
-    pdf.set_fill_color(240, 248, 255)
-    pdf.rect(40, 105, 130, 50, 'F')
-    pdf.set_draw_color(0, 102, 204)
-    pdf.rect(40, 105, 130, 50)
-    
-    if FONT_PATH:
-        pdf.set_font('Noto', '', 16)
-    else:
-        pdf.set_font("Helvetica", "B", 16)
-    pdf.set_text_color(color[0], color[1], color[2])
-    pdf.set_xy(45, 112)
-    pdf.cell(120, 12, f"{score:.1f} / {total}", 0, 1, 'C')
-    
-    if FONT_PATH:
-        pdf.set_font('Noto', '', 12)
-    else:
-        pdf.set_font("Helvetica", "", 12)
-    pdf.set_xy(45, 128)
-    pdf.cell(120, 12, f"({percentage:.1f}%)", 0, 1, 'C')
-    
-    pdf.ln(20)
-    
-    if FONT_PATH:
-        pdf.set_font('Noto', '', 14)
-    else:
-        pdf.set_font("Helvetica", "", 14)
-    pdf.set_text_color(color[0], color[1], color[2])
-    grade_text = reshape_arabic(grade_msg)
-    pdf.cell(0, 12, grade_text, 0, 1, 'C')
-    
-    if FONT_PATH:
-        pdf.set_font('Noto', '', 10)
-    else:
-        pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(100, 100, 100)
-    advice_text = reshape_arabic(advice)
-    pdf.cell(0, 10, advice_text, 0, 1, 'C')
-    pdf.ln(15)
-    
-    # حقوق البوت كنص عادي
-    pdf.set_font_size(10)
-    pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 8, "@ZeQuiz_Bot", 0, 1, 'C')
-    
-    path = tempfile.mktemp(suffix='.pdf')
-    pdf.output(path)
-    return path
+    bot.send_message(user_id, "✅ تم إرسال المنبه بنجاح!")
+
+def run_repeat_timer(repeat_id, interval_seconds, user_id, channel_id, message, media_type, media_file_id, end_time):
+    """تشغيل التكرار"""
+    count = 1
+    while True:
+        time.sleep(interval_seconds)
+        
+        # التحقق من انتهاء الوقت
+        if time.time() >= end_time:
+            c.execute("UPDATE repeats SET is_active=0 WHERE id=?", (repeat_id,))
+            conn.commit()
+            bot.send_message(user_id, f"✅ انتهى وقت التكرار المحدد. تم إرسال {count} رسالة.")
+            break
+        
+        # التحقق من أن التكرار لا يزال نشطاً
+        c.execute("SELECT is_active FROM repeats WHERE id=?", (repeat_id,))
+        row = c.fetchone()
+        if not row or row[0] == 0:
+            break
+        
+        # إرسال الرسالة
+        if channel_id and channel_id != "None":
+            chat_id = channel_id
+        else:
+            chat_id = user_id
+        
+        try:
+            if media_type == "photo":
+                bot.send_photo(chat_id, media_file_id, caption=f"{message}\n\n🔄 التكرار #{count}")
+            elif media_type == "document":
+                bot.send_document(chat_id, media_file_id, caption=f"{message}\n\n🔄 التكرار #{count}")
+            elif media_type == "video":
+                bot.send_video(chat_id, media_file_id, caption=f"{message}\n\n🔄 التكرار #{count}")
+            else:
+                bot.send_message(chat_id, f"{message}\n\n🔄 التكرار #{count}")
+            count += 1
+        except Exception as e:
+            bot.send_message(user_id, f"❌ فشل إرسال التكرار: {e}")
 
 # ========== 3. أوامر البوت ==========
 @bot.message_handler(commands=['start'])
@@ -274,517 +199,371 @@ def start(message):
     if len(message.text.split()) > 1:
         ref = message.text.split()[1]
         if ref.isdigit() and int(ref) != user_id:
-            success = add_referral(int(ref), user_id)
-            if success:
-                bot.send_message(user_id, "✅ تم تفعيل الإحالة! حصل الداعم على 0.25 نقطة.")
-                bot.send_message(int(ref), "🎉 قام مستخدم جديد بالتسجيل عبر رابطك! تم إضافة 0.25 نقطة إلى رصيدك.")
-            else:
-                bot.send_message(user_id, "ℹ️ تم تفعيل حسابك مسبقاً، لا يمكن إضافة نقاط إحالة مرة أخرى.")
+            if add_referral(int(ref), user_id):
+                bot.send_message(user_id, "✅ تم تفعيل الإحالة! حصل الداعم على 3 نقاط.")
+                bot.send_message(int(ref), "🎉 قام مستخدم جديد بالتسجيل عبر رابطك! تم إضافة 3 نقاط إلى رصيدك.")
     
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📝 دخول إلى اختبار", callback_data="enter_exam"))
-    markup.add(InlineKeyboardButton("📋 اختباراتي", callback_data="my_exams"))
-    markup.add(InlineKeyboardButton("➕ إنشاء اختبار", callback_data="create_exam"))
+    markup.add(InlineKeyboardButton("⏰ منبه جديد", callback_data="new_reminder"))
+    markup.add(InlineKeyboardButton("🔄 تكرار جديد", callback_data="new_repeat"))
+    markup.add(InlineKeyboardButton("📋 قائمة المنبهات", callback_data="my_reminders"))
+    markup.add(InlineKeyboardButton("🔄 قائمة التكرارات", callback_data="my_repeats"))
     markup.add(InlineKeyboardButton("🎁 مشاركة الرابط", callback_data="share_link"))
     if user_id == OWNER_ID:
         markup.add(InlineKeyboardButton("🔧 لوحة التحكم", callback_data="admin_panel"))
     
     bot.send_message(user_id,
-        f"🎓 بوت الاختبارات\n\n"
-        f"• رصيدك: {user['points']:.2f} نقطة\n"
-        f"• إنشاء اختبار جديد يستهلك نقطة واحدة.\n"
-        f"• دخول الاختبار مجاني.\n"
-        f"• احصل على نقاط عبر مشاركة الرابط (كل مشاركة = 0.25 نقطة).\n"
+        f"⏰ *بوت المنبه والتكرار*\n\n"
+        f"• رصيدك: {user['points']} نقطة\n"
+        f"• كل منبه أو تكرار يستهلك نقطة واحدة.\n"
+        f"• احصل على نقاط عبر مشاركة الرابط (كل مشاركة = 3 نقاط).\n"
         f"رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\n"
         f"📌 @ZeQuiz_Bot",
-        reply_markup=markup)
+        parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "share_link")
 def share_link(call):
     user_id = call.message.chat.id
     bot.answer_callback_query(call.id)
-    bot.send_message(user_id, f"🎁 رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\nكل مشاركة = 0.25 نقطة!")
+    bot.send_message(user_id, f"🎁 رابط إحالتك:\nhttps://t.me/{bot.get_me().username}?start={user_id}\n\nكل مشاركة = 3 نقاط!")
 
-@bot.callback_query_handler(func=lambda call: call.data == "my_exams")
-def my_exams(call):
+@bot.callback_query_handler(func=lambda call: call.data == "my_reminders")
+def my_reminders(call):
     user_id = call.message.chat.id
-    exams = get_exams_by_user(user_id)
-    if not exams:
-        bot.send_message(user_id, "📭 لم تقم بإنشاء أي اختبارات بعد.")
+    c.execute("SELECT id, duration_seconds, message FROM reminders WHERE user_id=? AND is_active=1", (user_id,))
+    reminders = c.fetchall()
+    if not reminders:
+        bot.send_message(user_id, "📭 لا توجد منبهات نشطة حالياً.")
         return
-    
-    for eid, title, code, created_at, time_per_question, results_link in exams:
-        time_text = f"{time_per_question} ثانية لكل سؤال" if time_per_question > 0 else "بدون وقت محدد"
-        results_url = f"https://t.me/{bot.get_me().username}?start=results_{results_link}"
-        
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("📊 عرض النتائج", callback_data=f"show_results_{eid}"))
-        markup.add(InlineKeyboardButton("📢 مشاركة في قناة", callback_data=f"share_exam_{code}"))
-        markup.add(InlineKeyboardButton("🔗 رابط الاختبار", url=f"https://t.me/{bot.get_me().username}?start=exam_{code}"))
-        
-        bot.send_message(user_id,
-            f"📋 *{title}*\n\n"
-            f"🆔 رمز الاختبار: `{code}`\n"
-            f"⏰ الوقت: {time_text}\n"
-            f"📅 التاريخ: {created_at[:19]}\n"
-            f"📊 رابط النتائج: [اضغط هنا]({results_url})",
-            parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("show_results_"))
-def show_results(call):
-    user_id = call.message.chat.id
-    exam_id = int(call.data.split("_")[2])
-    
-    c.execute("SELECT created_by, title FROM exams WHERE id=?", (exam_id,))
-    exam = c.fetchone()
-    if not exam or exam[0] != user_id:
-        bot.answer_callback_query(call.id, "غير مصرح لك بعرض نتائج هذا الاختبار.", True)
-        return
-    
-    results = get_results_by_exam_id(exam_id)
-    if not results:
-        bot.send_message(user_id, f"📊 لا توجد نتائج لاختبار {exam[1]} بعد.")
-        return
-    
-    txt = f"📊 *نتائج اختبار {exam[1]}*\n\n"
-    for student_id, student_name, score, total, percentage, date in results:
-        name = student_name if student_name else f"مستخدم {student_id}"
-        txt += f"👤 {name}\n   🎯 {score:.1f}/{total} ({percentage:.1f}%)\n   📅 {date[:16]}\n\n"
-    
+    txt = "⏰ *المنبهات النشطة:*\n\n"
+    for rid, duration, msg in reminders:
+        time_str = format_time(duration)
+        txt += f"🆔 {rid} | الوقت: {time_str}\n📝 {msg[:30] if msg else 'بدون نص'}\n\n"
     bot.send_message(user_id, txt, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("share_exam_"))
-def share_exam_channel(call):
+@bot.callback_query_handler(func=lambda call: call.data == "my_repeats")
+def my_repeats(call):
     user_id = call.message.chat.id
-    code = call.data.split("_")[2]
-    exam = get_exam_by_code(code)
-    if not exam or exam["created_by"] != user_id:
-        bot.answer_callback_query(call.id, "غير مصرح.", True)
+    c.execute("SELECT id, interval_seconds, message FROM repeats WHERE user_id=? AND is_active=1", (user_id,))
+    repeats = c.fetchall()
+    if not repeats:
+        bot.send_message(user_id, "📭 لا توجد تكرارات نشطة حالياً.")
         return
-    
-    bot.answer_callback_query(call.id)
-    
-    direct_link = f"https://t.me/{bot.get_me().username}?start=exam_{code}"
-    
-    bot.send_message(user_id,
-        f"📢 لمشاركة الاختبار في قناة تلغرام:\n\n"
-        f"1. أضف البوت @{bot.get_me().username} أدمن في قناتك\n"
-        f"2. انسخ الرابط التالي وأرسله في قناتك:\n"
-        f"{direct_link}\n\n"
-        f"📝 نص جاهز للنشر في القناة:\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎓 اختبار: {exam['title']}\n\n"
-        f"📝 اختبر معلوماتك الآن!\n"
-        f"{direct_link}\n\n"
-        f"@ZeQuiz_Bot\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        disable_web_page_preview=True)
+    txt = "🔄 *التكرارات النشطة:*\n\n"
+    for rid, interval, msg in repeats:
+        time_str = format_time(interval)
+        txt += f"🆔 {rid} | كل {time_str}\n📝 {msg[:30] if msg else 'بدون نص'}\n\n"
+    bot.send_message(user_id, txt, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data == "enter_exam")
-def enter_exam(call):
-    user_id = call.message.chat.id
-    bot.send_message(user_id, "🔗 أرسل رمز الاختبار (مثال: ABC123):")
-    bot.register_next_step_handler(call.message, process_exam_code)
-
-def process_exam_code(message):
-    user_id = message.chat.id
-    code = message.text.strip().upper()
-    exam = get_exam_by_code(code)
-    if not exam:
-        bot.send_message(user_id, "❌ رمز الاختبار غير صحيح.")
-        return
-    
-    # طلب اسم المستخدم
-    msg = bot.send_message(user_id, "📝 أرسل اسمك (سيظهر في الشهادة والنتائج):")
-    bot.register_next_step_handler(msg, process_student_name, exam)
-
-def process_student_name(message, exam):
-    user_id = message.chat.id
-    student_name = message.text.strip()
-    
-    user_answers[user_id] = {
-        "exam_id": exam["id"],
-        "title": exam["title"],
-        "questions": exam["questions"],
-        "answers": exam["answers"],
-        "user_ans": [],
-        "scores": [],
-        "index": 0,
-        "time_per_question": exam["time_per_question"],
-        "timer_active": False,
-        "timer_thread": None,
-        "current_message_id": None,
-        "student_name": student_name
-    }
-    send_question(user_id)
-
-user_answers = {}
-
-def start_timer(user_id, duration):
-    data = user_answers.get(user_id)
-    if not data:
-        return
-    
-    data["timer_active"] = True
-    start_time = time.time()
-    end_time = start_time + duration
-    
-    while data["timer_active"] and time.time() < end_time:
-        remaining = int(end_time - time.time())
-        if remaining <= 0:
-            break
-        
-        if data["current_message_id"]:
-            try:
-                bot.edit_message_text(
-                    f"⏰ الوقت المتبقي: {remaining} ثانية", 
-                    user_id, 
-                    data["current_message_id"]
-                )
-            except:
-                pass
-        time.sleep(1)
-    
-    if data["timer_active"]:
-        data["timer_active"] = False
-        bot.send_message(user_id, f"⏰ انتهى وقت السؤال {data['index'] + 1}! سيتم الانتقال للسؤال التالي.")
-        
-        data["user_ans"].append("(لم يجب)")
-        data["scores"].append({"score": 0, "percentage": 0})
-        data["index"] += 1
-        
-        if data["current_message_id"]:
-            try:
-                bot.delete_message(user_id, data["current_message_id"])
-            except:
-                pass
-            data["current_message_id"] = None
-        
-        send_question(user_id)
-
-def send_question(user_id):
-    data = user_answers.get(user_id)
-    if not data:
-        return
-    
-    idx = data["index"]
-    if idx >= len(data["questions"]):
-        finish_exam(user_id)
-        return
-    
-    q = data["questions"][idx]
-    
-    if data["time_per_question"] > 0:
-        timer_msg = bot.send_message(user_id, f"⏰ سيبدأ السؤال خلال 3 ثوان...")
-        time.sleep(3)
-        bot.delete_message(user_id, timer_msg.message_id)
-        
-        timer_msg = bot.send_message(user_id, f"⏰ الوقت المتبقي: {data['time_per_question']} ثانية")
-        data["current_message_id"] = timer_msg.message_id
-        
-        timer_thread = threading.Thread(target=start_timer, args=(user_id, data["time_per_question"]))
-        timer_thread.daemon = True
-        timer_thread.start()
-    
-    if q["type"] == "mcq":
-        markup = InlineKeyboardMarkup(row_width=1)
-        buttons = []
-        for opt in q["options"]:
-            buttons.append(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
-        markup.add(*buttons)
-        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
-    elif q["type"] == "truefalse":
-        markup = InlineKeyboardMarkup(row_width=2)
-        markup.add(InlineKeyboardButton("✅ صح", callback_data="ans_صح"), InlineKeyboardButton("❌ خطأ", callback_data="ans_خطأ"))
-        bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}", reply_markup=markup)
-    else:
-        msg = bot.send_message(user_id, f"📝 السؤال {idx+1}: {q['text']}\n\nأجب كتابياً:")
-        bot.register_next_step_handler(msg, process_essay, user_id)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ans_"))
-def answer_callback(call):
-    user_id = call.message.chat.id
-    answer = call.data.split("_")[1]
-    data = user_answers.get(user_id)
-    if not data:
-        bot.answer_callback_query(call.id, "انتهت الجلسة")
-        return
-    
-    data["timer_active"] = False
-    
-    if data["current_message_id"]:
-        try:
-            bot.delete_message(user_id, data["current_message_id"])
-        except:
-            pass
-        data["current_message_id"] = None
-    
-    idx = data["index"]
-    q = data["questions"][idx]
-    correct = data["answers"][idx]
-    
-    if q["type"] == "mcq":
-        is_correct = (answer == correct)
-        score = 1.0 if is_correct else 0.0
-        percentage = 100.0 if is_correct else 0.0
-        result_text = "✅ صحيح" if is_correct else "❌ خطأ"
-    else:
-        is_correct = (answer == correct)
-        score = 1.0 if is_correct else 0.0
-        percentage = 100.0 if is_correct else 0.0
-        result_text = "✅ صحيح" if is_correct else "❌ خطأ"
-    
-    data["user_ans"].append(answer)
-    data["scores"].append({"score": score, "percentage": percentage})
-    data["index"] += 1
-    
-    bot.answer_callback_query(call.id)
-    bot.delete_message(user_id, call.message.message_id)
-    
-    bot.send_message(user_id, f"📊 تصحيح السؤال {idx+1}: {result_text}\nالنتيجة: {score}/{1} ({percentage:.0f}%)")
-    
-    send_question(user_id)
-
-def process_essay(message, user_id):
-    answer = message.text.strip()
-    data = user_answers.get(user_id)
-    if not data:
-        return
-    
-    data["timer_active"] = False
-    
-    if data["current_message_id"]:
-        try:
-            bot.delete_message(user_id, data["current_message_id"])
-        except:
-            pass
-        data["current_message_id"] = None
-    
-    idx = data["index"]
-    q = data["questions"][idx]
-    correct = data["answers"][idx]
-    
-    essay_score, essay_percentage = calculate_essay_score(answer, correct)
-    
-    data["user_ans"].append(answer)
-    data["scores"].append({"score": essay_score, "percentage": essay_percentage})
-    data["index"] += 1
-    
-    bot.send_message(user_id, f"📊 تصحيح السؤال {idx+1}:\nالنتيجة: {essay_score:.1f}/{1} ({essay_percentage:.0f}%)\nالإجابة الصحيحة: {correct}")
-    
-    send_question(user_id)
-
-def finish_exam(user_id):
-    data = user_answers.pop(user_id, None)
-    if not data:
-        return
-    
-    total = len(data["questions"])
-    total_score = sum(s["score"] for s in data["scores"])
-    percentage = (total_score / total) * 100
-    
-    details = []
-    for i, (q, user_ans, correct, score_info) in enumerate(zip(data["questions"], data["user_ans"], data["answers"], data["scores"])):
-        details.append({
-            "type": q["type"],
-            "question": q["text"],
-            "user_answer": user_ans[:100],
-            "correct_answer": correct,
-            "score": score_info["score"],
-            "max_score": 1.0,
-            "percentage": score_info["percentage"]
-        })
-    
-    save_result(data["exam_id"], user_id, data["student_name"], total_score, total, percentage, details)
-    
-    grade_msg, advice, _ = get_grade_message(percentage)
-    bot.send_message(user_id, f"🎉 انتهى الاختبار!\nالنتيجة النهائية: {total_score:.1f}/{total} ({percentage:.1f}%)\n\n{grade_msg}\n{advice}")
-    
-    try:
-        pdf_path = generate_certificate(user_id, data["title"], total_score, total, percentage)
-        if pdf_path and os.path.exists(pdf_path):
-            with open(pdf_path, 'rb') as f:
-                bot.send_document(user_id, f, caption="📜 شهادتك - @ZeQuiz_Bot", visible_file_name="certificate.pdf")
-            os.unlink(pdf_path)
-            
-            share_markup = InlineKeyboardMarkup()
-            share_markup.add(InlineKeyboardButton("📢 شارك نتيجتك", callback_data=f"share_result_{user_id}_{int(percentage)}"))
-            bot.send_message(user_id, "🎉 هل تريد مشاركة نتيجتك مع أصدقائك؟", reply_markup=share_markup)
-    except Exception as e:
-        bot.send_message(user_id, f"❌ حدث خطأ أثناء إنشاء الشهادة: {str(e)[:100]}")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("share_result_"))
-def share_result(call):
-    parts = call.data.split("_")
-    user_id = int(parts[2])
-    percentage = parts[3]
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, f"🎉 حصلت على نتيجة {percentage}% في اختبار @ZeQuiz_Bot!\n\nشاركها مع أصدقائك: https://t.me/{bot.get_me().username}")
-
-# معالجة رابط النتائج
-@bot.message_handler(func=lambda m: m.text and m.text.startswith("https://t.me/") and "start=results_" in m.text)
-def handle_results_link(message):
-    results_code = message.text.split("start=results_")[1].split()[0]
-    exam = get_exam_by_results_link(results_code)
-    if not exam:
-        bot.send_message(message.chat.id, "❌ رابط غير صحيح.")
-        return
-    
-    results = get_results_by_exam_id(exam["id"])
-    if not results:
-        bot.send_message(message.chat.id, f"📊 لا توجد نتائج لاختبار {exam['title']} بعد.")
-        return
-    
-    txt = f"📊 *نتائج اختبار {exam['title']}*\n\n"
-    for student_id, student_name, score, total, percentage, date in results:
-        name = student_name if student_name else f"مستخدم {student_id}"
-        txt += f"👤 {name}\n   🎯 {score:.1f}/{total} ({percentage:.1f}%)\n   📅 {date[:16]}\n\n"
-    
-    bot.send_message(message.chat.id, txt, parse_mode="Markdown")
-
-# ========== 4. إنشاء اختبار ==========
-temp_exam = {}
-
-@bot.callback_query_handler(func=lambda call: call.data == "create_exam")
-def create_exam_start(call):
+# ========== 4. إنشاء منبه جديد ==========
+@bot.callback_query_handler(func=lambda call: call.data == "new_reminder")
+def new_reminder_start(call):
     user_id = call.message.chat.id
     user = get_user(user_id)
     if user["points"] < 1:
-        bot.answer_callback_query(call.id, f"ليس لديك نقاط كافية لإنشاء اختبار. رصيدك: {user['points']:.2f} نقطة. شارك الرابط لتحصل على نقاط!", show_alert=True)
+        bot.answer_callback_query(call.id, f"ليس لديك نقاط كافية. رصيدك: {user['points']} نقطة. شارك الرابط!", show_alert=True)
         return
     
-    temp_exam[user_id] = {"step": "title", "questions": [], "answers": []}
-    bot.send_message(user_id, "📌 أرسل عنوان الاختبار:")
-    bot.register_next_step_handler(call.message, process_title)
+    temp_data[user_id] = {"type": "reminder", "step": "duration"}
+    bot.edit_message_text("⏰ أرسل مدة المنبه (بالثواني)\nمثال: 60 (لدقيقة واحدة):", user_id, call.message.message_id)
+    bot.register_next_step_handler(call.message, process_reminder_duration)
 
-def process_title(message):
-    user_id = message.chat.id
-    temp_exam[user_id]["title"] = message.text.strip()
-    temp_exam[user_id]["step"] = "time_per_question"
-    bot.send_message(user_id, "⏰ أرسل الوقت المخصص لكل سؤال (بالثواني)\nمثال: 30 (أي 30 ثانية لكل سؤال)\nأو أرسل 0 إذا لا يوجد وقت محدد:")
-
-@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "time_per_question")
-def process_time_per_question(message):
+def process_reminder_duration(message):
     user_id = message.chat.id
     try:
-        time_per_question = int(message.text.strip())
-        temp_exam[user_id]["time_per_question"] = time_per_question
-        temp_exam[user_id]["step"] = "question"
-        bot.send_message(user_id, "➕ أضف السؤال الأول.\nأرسل السؤال ثم النوع في سطر جديد (mcq/truefalse/text):\nمثال:\nما عاصمة فرنسا؟\ntext")
+        duration = int(message.text.strip())
+        if duration <= 0:
+            raise ValueError
+        temp_data[user_id]["duration"] = duration
+        temp_data[user_id]["step"] = "channel"
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📱 في البوت فقط", callback_data="reminder_channel_none"))
+        markup.add(InlineKeyboardButton("📢 في قناة (أضف البوت أدمن)", callback_data="reminder_channel_add"))
+        bot.send_message(user_id, "📍 أين تريد إرسال المنبه؟", reply_markup=markup)
     except:
-        bot.send_message(user_id, "❌ أرسل رقماً صحيحاً (بالثواني). مثال: 30")
+        bot.send_message(user_id, "❌ أرسل رقماً صحيحاً أكبر من 0.")
 
-@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "question")
-def process_question(message):
-    user_id = message.chat.id
-    lines = message.text.strip().split('\n')
-    if len(lines) < 2:
-        bot.send_message(user_id, "❌ اكتب السؤال ثم النوع في سطر جديد.")
-        return
-    q_text = lines[0]
-    q_type = lines[1].lower()
-    if q_type not in ["text", "mcq", "truefalse"]:
-        bot.send_message(user_id, "❌ النوع غير صالح. اختر: text, mcq, truefalse")
-        return
-    temp_exam[user_id]["current_q"] = {"text": q_text, "type": q_type}
-    if q_type == "mcq":
-        temp_exam[user_id]["step"] = "mcq_options"
-        bot.send_message(user_id, "📋 أرسل خيارات السؤال (كل خيار في سطر منفرد):\nمثال:\nخيار 1\nخيار 2\nخيار 3")
-    elif q_type == "truefalse":
-        temp_exam[user_id]["step"] = "truefalse_answer"
-        bot.send_message(user_id, "✅ أرسل الإجابة الصحيحة (صح أو خطأ):")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reminder_channel_"))
+def process_reminder_channel(call):
+    user_id = call.message.chat.id
+    if call.data == "reminder_channel_none":
+        temp_data[user_id]["channel_id"] = None
+        temp_data[user_id]["step"] = "message_type"
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📝 نص", callback_data="reminder_msg_text"))
+        markup.add(InlineKeyboardButton("🖼️ صورة", callback_data="reminder_msg_photo"))
+        markup.add(InlineKeyboardButton("📄 ملف", callback_data="reminder_msg_document"))
+        markup.add(InlineKeyboardButton("🎥 فيديو", callback_data="reminder_msg_video"))
+        bot.edit_message_text("📝 اختر نوع المحتوى للمنبه:", user_id, call.message.message_id, reply_markup=markup)
     else:
-        temp_exam[user_id]["step"] = "essay_answer"
-        bot.send_message(user_id, "✍️ أرسل الإجابة النموذجية:")
+        temp_data[user_id]["step"] = "channel_id"
+        bot.edit_message_text("📢 أرسل معرف القناة (مثال: @username):", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_reminder_channel_id)
 
-@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "mcq_options")
-def process_mcq_options(message):
+def process_reminder_channel_id(message):
     user_id = message.chat.id
-    opts = [line.strip() for line in message.text.strip().split('\n') if line.strip()]
-    if len(opts) < 2:
-        bot.send_message(user_id, "❌ يجب إدخال خيارين على الأقل (كل خيار في سطر منفرد).")
-        return
-    temp_exam[user_id]["current_q"]["options"] = opts
-    temp_exam[user_id]["step"] = "mcq_answer"
-    options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(opts)])
-    bot.send_message(user_id, f"الخيارات:\n{options_text}\n\nأرسل نص الإجابة الصحيحة (كما هو مكتوب بالضبط):")
-
-@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "mcq_answer")
-def process_mcq_answer(message):
-    user_id = message.chat.id
-    temp_exam[user_id]["current_q"]["answer"] = message.text.strip()
-    save_question(user_id)
-    ask_next(user_id)
-
-@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "truefalse_answer")
-def process_truefalse_answer(message):
-    user_id = message.chat.id
-    ans = message.text.strip()
-    if ans not in ["صح", "خطأ"]:
-        bot.send_message(user_id, "❌ أرسل 'صح' أو 'خطأ'")
-        return
-    temp_exam[user_id]["current_q"]["answer"] = ans
-    save_question(user_id)
-    ask_next(user_id)
-
-@bot.message_handler(func=lambda m: m.chat.id in temp_exam and temp_exam.get(m.chat.id, {}).get("step") == "essay_answer")
-def process_essay_answer(message):
-    user_id = message.chat.id
-    temp_exam[user_id]["current_q"]["answer"] = message.text.strip()
-    save_question(user_id)
-    ask_next(user_id)
-
-def save_question(uid):
-    q = temp_exam[uid]["current_q"]
-    temp_exam[uid]["questions"].append(q)
-    temp_exam[uid]["answers"].append(q["answer"])
-    del temp_exam[uid]["current_q"]
-
-def ask_next(uid):
+    channel_id = message.text.strip()
+    temp_data[user_id]["channel_id"] = channel_id
+    temp_data[user_id]["step"] = "message_type"
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("➕ إضافة سؤال", callback_data="next_q"), InlineKeyboardButton("✅ إنهاء", callback_data="finish_exam"))
-    bot.send_message(uid, "✅ تم حفظ السؤال. ماذا تريد؟", reply_markup=markup)
+    markup.add(InlineKeyboardButton("📝 نص", callback_data="reminder_msg_text"))
+    markup.add(InlineKeyboardButton("🖼️ صورة", callback_data="reminder_msg_photo"))
+    markup.add(InlineKeyboardButton("📄 ملف", callback_data="reminder_msg_document"))
+    markup.add(InlineKeyboardButton("🎥 فيديو", callback_data="reminder_msg_video"))
+    bot.send_message(user_id, "📝 اختر نوع المحتوى للمنبه:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data == "next_q")
-def next_question(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reminder_msg_"))
+def process_reminder_message_type(call):
     user_id = call.message.chat.id
-    if user_id not in temp_exam:
-        return
-    temp_exam[user_id]["step"] = "question"
-    bot.edit_message_text("➕ أضف السؤال التالي (سؤال ثم نوع في سطر جديد):", user_id, call.message.message_id)
-    bot.register_next_step_handler(call.message, process_question)
+    msg_type = call.data.split("_")[2]
+    temp_data[user_id]["media_type"] = msg_type
+    temp_data[user_id]["step"] = "content"
+    
+    if msg_type == "text":
+        bot.edit_message_text("✏️ أرسل النص الذي تريد إرساله عند انتهاء المنبه:", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_reminder_text)
+    elif msg_type == "photo":
+        bot.edit_message_text("🖼️ أرسل الصورة (كملف أو معرف):", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_reminder_media, "photo")
+    elif msg_type == "document":
+        bot.edit_message_text("📄 أرسل الملف:", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_reminder_media, "document")
+    elif msg_type == "video":
+        bot.edit_message_text("🎥 أرسل الفيديو:", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_reminder_media, "video")
 
-@bot.callback_query_handler(func=lambda call: call.data == "finish_exam")
-def finish_creation(call):
-    user_id = call.message.chat.id
-    if user_id not in temp_exam:
+def process_reminder_text(message):
+    user_id = message.chat.id
+    temp_data[user_id]["message"] = message.text
+    temp_data[user_id]["media_file_id"] = None
+    finalize_reminder(user_id)
+
+def process_reminder_media(message, media_type):
+    user_id = message.chat.id
+    if media_type == "photo" and message.photo:
+        file_id = message.photo[-1].file_id
+        caption = message.caption
+    elif media_type == "document" and message.document:
+        file_id = message.document.file_id
+        caption = message.caption
+    elif media_type == "video" and message.video:
+        file_id = message.video.file_id
+        caption = message.caption
+    else:
+        bot.send_message(user_id, "❌ نوع الملف غير صحيح. أعد المحاولة.")
         return
     
+    temp_data[user_id]["media_file_id"] = file_id
+    temp_data[user_id]["message"] = caption or ""
+    finalize_reminder(user_id)
+
+def finalize_reminder(user_id):
+    data = temp_data.pop(user_id)
+    
+    # استهلاك نقطة
+    update_points(user_id, -1)
+    
+    # حفظ في قاعدة البيانات
+    c.execute("INSERT INTO reminders (user_id, channel_id, duration_seconds, message, media_type, media_file_id, created_at) VALUES (?,?,?,?,?,?,?)",
+              (user_id, data.get("channel_id"), data["duration"], data.get("message"), data.get("media_type"), data.get("media_file_id"), datetime.now().isoformat()))
+    reminder_id = c.lastrowid
+    conn.commit()
+    
+    # تشغيل المؤقت التنازلي
+    thread = threading.Thread(target=run_countdown_timer, args=(user_id, data["duration"], reminder_id, data.get("channel_id"), data.get("message"), data.get("media_type"), data.get("media_file_id")))
+    thread.daemon = True
+    thread.start()
+    
+    new_user = get_user(user_id)
+    time_str = format_time(data["duration"])
+    bot.send_message(user_id, f"✅ تم إنشاء المنبه بنجاح!\n⏰ الوقت: {time_str}\n⭐ النقاط المتبقية: {new_user['points']}\n\nسيظهر لك مؤقت تنازلي فوراً!")
+
+# ========== 5. إنشاء تكرار جديد ==========
+@bot.callback_query_handler(func=lambda call: call.data == "new_repeat")
+def new_repeat_start(call):
+    user_id = call.message.chat.id
     user = get_user(user_id)
     if user["points"] < 1:
-        bot.edit_message_text(f"❌ ليس لديك نقاط كافية لإنشاء الاختبار. رصيدك: {user['points']:.2f} نقطة.", user_id, call.message.message_id)
-        temp_exam.pop(user_id, None)
+        bot.answer_callback_query(call.id, f"ليس لديك نقاط كافية. رصيدك: {user['points']} نقطة.", show_alert=True)
         return
     
-    update_points(user_id, -1)
-    data = temp_exam.pop(user_id)
-    time_text = f"{data['time_per_question']} ثانية لكل سؤال" if data["time_per_question"] > 0 else "بدون وقت محدد"
-    
-    eid, code, results_code = add_exam(data["title"], data["questions"], data["answers"], user_id, data["time_per_question"])
-    new_user = get_user(user_id)
-    results_url = f"https://t.me/{bot.get_me().username}?start=results_{results_code}"
-    
-    bot.edit_message_text(
-        f"✅ تم إنشاء الاختبار '{data['title']}' بنجاح!\n\n"
-        f"⏰ الوقت لكل سؤال: {time_text}\n"
-        f"🔗 رابط الاختبار:\nhttps://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
-        f"📊 رابط النتائج (مشاركة مع الطلاب):\n{results_url}\n\n"
-        f"🆔 رمز الاختبار: `{code}`\n"
-        f"📋 عدد الأسئلة: {len(data['questions'])}\n\n"
-        f"⭐ النقاط المتبقية: {new_user['points']:.2f}",
-        user_id, call.message.message_id, parse_mode="Markdown", disable_web_page_preview=True)
+    temp_data[user_id] = {"type": "repeat", "step": "interval_unit"}
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("ثواني", callback_data="repeat_unit_seconds"))
+    markup.add(InlineKeyboardButton("دقائق", callback_data="repeat_unit_minutes"))
+    markup.add(InlineKeyboardButton("ساعات", callback_data="repeat_unit_hours"))
+    bot.send_message(user_id, "🔄 اختر وحدة الوقت بين كل تكرار:", reply_markup=markup)
 
-# ========== 5. لوحة تحكم المالك ==========
+@bot.callback_query_handler(func=lambda call: call.data.startswith("repeat_unit_"))
+def process_repeat_unit(call):
+    user_id = call.message.chat.id
+    unit = call.data.split("_")[2]
+    temp_data[user_id]["unit"] = unit
+    temp_data[user_id]["step"] = "interval_value"
+    bot.edit_message_text(f"🔄 أرسل الرقم (مثال: 30):", user_id, call.message.message_id)
+    bot.register_next_step_handler(call.message, process_repeat_interval)
+
+def process_repeat_interval(message):
+    user_id = message.chat.id
+    try:
+        value = int(message.text.strip())
+        if value <= 0:
+            raise ValueError
+        temp_data[user_id]["interval_value"] = value
+        temp_data[user_id]["step"] = "end_time_unit"
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("ثواني", callback_data="end_unit_seconds"))
+        markup.add(InlineKeyboardButton("دقائق", callback_data="end_unit_minutes"))
+        markup.add(InlineKeyboardButton("ساعات", callback_data="end_unit_hours"))
+        bot.send_message(user_id, "⏰ اختر وحدة مدة التكرار:", reply_markup=markup)
+    except:
+        bot.send_message(user_id, "❌ أرسل رقماً صحيحاً أكبر من 0.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("end_unit_"))
+def process_end_unit(call):
+    user_id = call.message.chat.id
+    unit = call.data.split("_")[2]
+    temp_data[user_id]["end_unit"] = unit
+    temp_data[user_id]["step"] = "end_value"
+    bot.edit_message_text("⏰ أرسل المدة (مثال: 24):", user_id, call.message.message_id)
+    bot.register_next_step_handler(call.message, process_repeat_end_time)
+
+def process_repeat_end_time(message):
+    user_id = message.chat.id
+    try:
+        value = int(message.text.strip())
+        if value <= 0:
+            raise ValueError
+        temp_data[user_id]["end_value"] = value
+        
+        # حساب الوقت النهائي بالثواني
+        unit = temp_data[user_id]["end_unit"]
+        if unit == "minutes":
+            end_seconds = value * 60
+        elif unit == "hours":
+            end_seconds = value * 3600
+        else:
+            end_seconds = value
+        
+        temp_data[user_id]["end_time"] = time.time() + end_seconds
+        temp_data[user_id]["step"] = "channel"
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📱 في البوت فقط", callback_data="repeat_channel_none"))
+        markup.add(InlineKeyboardButton("📢 في قناة (أضف البوت أدمن)", callback_data="repeat_channel_add"))
+        bot.send_message(user_id, "📍 أين تريد إرسال التكرارات؟", reply_markup=markup)
+    except:
+        bot.send_message(user_id, "❌ أرسل رقماً صحيحاً أكبر من 0.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("repeat_channel_"))
+def process_repeat_channel(call):
+    user_id = call.message.chat.id
+    if call.data == "repeat_channel_none":
+        temp_data[user_id]["channel_id"] = None
+        temp_data[user_id]["step"] = "message_type"
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📝 نص", callback_data="repeat_msg_text"))
+        markup.add(InlineKeyboardButton("🖼️ صورة", callback_data="repeat_msg_photo"))
+        markup.add(InlineKeyboardButton("📄 ملف", callback_data="repeat_msg_document"))
+        markup.add(InlineKeyboardButton("🎥 فيديو", callback_data="repeat_msg_video"))
+        bot.edit_message_text("📝 اختر نوع المحتوى للتكرار:", user_id, call.message.message_id, reply_markup=markup)
+    else:
+        temp_data[user_id]["step"] = "channel_id"
+        bot.edit_message_text("📢 أرسل معرف القناة (مثال: @username):", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_repeat_channel_id)
+
+def process_repeat_channel_id(message):
+    user_id = message.chat.id
+    channel_id = message.text.strip()
+    temp_data[user_id]["channel_id"] = channel_id
+    temp_data[user_id]["step"] = "message_type"
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📝 نص", callback_data="repeat_msg_text"))
+    markup.add(InlineKeyboardButton("🖼️ صورة", callback_data="repeat_msg_photo"))
+    markup.add(InlineKeyboardButton("📄 ملف", callback_data="repeat_msg_document"))
+    markup.add(InlineKeyboardButton("🎥 فيديو", callback_data="repeat_msg_video"))
+    bot.send_message(user_id, "📝 اختر نوع المحتوى للتكرار:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("repeat_msg_"))
+def process_repeat_message_type(call):
+    user_id = call.message.chat.id
+    msg_type = call.data.split("_")[2]
+    temp_data[user_id]["media_type"] = msg_type
+    temp_data[user_id]["step"] = "content"
+    
+    if msg_type == "text":
+        bot.edit_message_text("✏️ أرسل النص الذي تريد تكراره:", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_repeat_text)
+    elif msg_type == "photo":
+        bot.edit_message_text("🖼️ أرسل الصورة:", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_repeat_media, "photo")
+    elif msg_type == "document":
+        bot.edit_message_text("📄 أرسل الملف:", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_repeat_media, "document")
+    elif msg_type == "video":
+        bot.edit_message_text("🎥 أرسل الفيديو:", user_id, call.message.message_id)
+        bot.register_next_step_handler(call.message, process_repeat_media, "video")
+
+def process_repeat_text(message):
+    user_id = message.chat.id
+    temp_data[user_id]["message"] = message.text
+    temp_data[user_id]["media_file_id"] = None
+    finalize_repeat(user_id)
+
+def process_repeat_media(message, media_type):
+    user_id = message.chat.id
+    if media_type == "photo" and message.photo:
+        file_id = message.photo[-1].file_id
+        caption = message.caption
+    elif media_type == "document" and message.document:
+        file_id = message.document.file_id
+        caption = message.caption
+    elif media_type == "video" and message.video:
+        file_id = message.video.file_id
+        caption = message.caption
+    else:
+        bot.send_message(user_id, "❌ نوع الملف غير صحيح. أعد المحاولة.")
+        return
+    
+    temp_data[user_id]["media_file_id"] = file_id
+    temp_data[user_id]["message"] = caption or ""
+    finalize_repeat(user_id)
+
+def finalize_repeat(user_id):
+    data = temp_data.pop(user_id)
+    
+    # حساب الفاصل الزمني بالثواني
+    unit = data["unit"]
+    interval_value = data["interval_value"]
+    if unit == "minutes":
+        interval_seconds = interval_value * 60
+    elif unit == "hours":
+        interval_seconds = interval_value * 3600
+    else:
+        interval_seconds = interval_value
+    
+    # استهلاك نقطة
+    update_points(user_id, -1)
+    
+    # حفظ في قاعدة البيانات
+    c.execute("INSERT INTO repeats (user_id, channel_id, interval_seconds, end_time, message, media_type, media_file_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
+              (user_id, data.get("channel_id"), interval_seconds, data.get("end_time"), data.get("message"), data.get("media_type"), data.get("media_file_id"), datetime.now().isoformat()))
+    repeat_id = c.lastrowid
+    conn.commit()
+    
+    # تشغيل التكرار
+    thread = threading.Thread(target=run_repeat_timer, args=(repeat_id, interval_seconds, user_id, data.get("channel_id"), data.get("message"), data.get("media_type"), data.get("media_file_id"), data.get("end_time")))
+    thread.daemon = True
+    thread.start()
+    
+    new_user = get_user(user_id)
+    interval_str = format_time(interval_seconds)
+    end_time_str = datetime.fromtimestamp(data["end_time"]).strftime('%Y-%m-%d %H:%M:%S')
+    bot.send_message(user_id, f"✅ تم إنشاء التكرار بنجاح!\n🔄 كل {interval_str}\n⏰ ينتهي في: {end_time_str}\n⭐ النقاط المتبقية: {new_user['points']}")
+
+# ========== 6. لوحة تحكم المالك ==========
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
 def admin_panel(call):
     if call.message.chat.id != OWNER_ID:
@@ -794,10 +573,56 @@ def admin_panel(call):
     markup.add(InlineKeyboardButton("➕ إضافة نقاط لمستخدم", callback_data="admin_add_points"))
     markup.add(InlineKeyboardButton("➖ خصم نقاط من مستخدم", callback_data="admin_remove_points"))
     markup.add(InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats"))
-    markup.add(InlineKeyboardButton("📋 قائمة جميع الاختبارات", callback_data="admin_all_exams"))
-    markup.add(InlineKeyboardButton("📈 نتائج اختبار", callback_data="admin_results"))
     markup.add(InlineKeyboardButton("📢 إذاعة للجميع", callback_data="admin_broadcast"))
     bot.send_message(OWNER_ID, "🔧 لوحة تحكم المالك", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_add_points")
+def admin_add_points(call):
+    if call.message.chat.id != OWNER_ID:
+        return
+    msg = bot.send_message(OWNER_ID, "أرسل معرف المستخدم وعدد النقاط (مثال: 123456789 5):")
+    bot.register_next_step_handler(msg, add_points_step)
+
+def add_points_step(message):
+    try:
+        parts = message.text.split()
+        uid = int(parts[0])
+        pts = int(parts[1])
+        update_points(uid, pts)
+        bot.send_message(OWNER_ID, f"✅ تم إضافة {pts} نقطة للمستخدم {uid}")
+    except:
+        bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_remove_points")
+def admin_remove_points(call):
+    if call.message.chat.id != OWNER_ID:
+        return
+    msg = bot.send_message(OWNER_ID, "أرسل معرف المستخدم وعدد النقاط (مثال: 123456789 3):")
+    bot.register_next_step_handler(msg, remove_points_step)
+
+def remove_points_step(message):
+    try:
+        parts = message.text.split()
+        uid = int(parts[0])
+        pts = int(parts[1])
+        update_points(uid, -pts)
+        bot.send_message(OWNER_ID, f"✅ تم خصم {pts} نقطة من المستخدم {uid}")
+    except:
+        bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_stats")
+def admin_stats(call):
+    if call.message.chat.id != OWNER_ID:
+        return
+    c.execute("SELECT COUNT(*) FROM users")
+    users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM reminders WHERE is_active=1")
+    active_reminders = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM repeats WHERE is_active=1")
+    active_repeats = c.fetchone()[0]
+    c.execute("SELECT SUM(points) FROM users")
+    total_points = c.fetchone()[0] or 0
+    bot.send_message(OWNER_ID, f"📊 إحصائيات البوت\n👥 المستخدمون: {users}\n⏰ المنبهات النشطة: {active_reminders}\n🔄 التكرارات النشطة: {active_repeats}\n⭐ مجموع النقاط: {total_points}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_broadcast")
 def admin_broadcast(call):
@@ -822,106 +647,7 @@ def send_broadcast(message):
         time.sleep(0.05)
     bot.send_message(OWNER_ID, f"✅ تم إرسال الإذاعة إلى {success} مستخدم.\n❌ فشل الإرسال إلى {fail} مستخدم.")
 
-@bot.callback_query_handler(func=lambda call: call.data == "admin_all_exams")
-def admin_all_exams(call):
-    if call.message.chat.id != OWNER_ID:
-        return
-    exams = get_all_exams_by_teacher(OWNER_ID)
-    if not exams:
-        bot.send_message(OWNER_ID, "لا توجد اختبارات حتى الآن.")
-        return
-    txt = "📋 قائمة جميع الاختبارات التي أنشأتها:\n\n"
-    for eid, title, code, created_at, time_per_question, results_link in exams:
-        time_text = f"{time_per_question} ثانية لكل سؤال" if time_per_question > 0 else "بدون وقت"
-        c.execute("SELECT COUNT(*) FROM results WHERE exam_id=?", (eid,))
-        participants = c.fetchone()[0]
-        txt += f"• {title}\n   رمز: {code}\n   الوقت: {time_text}\n   تاريخ: {created_at[:19]}\n   عدد المشاركين: {participants}\n   رابط: https://t.me/{bot.get_me().username}?start=exam_{code}\n\n"
-    bot.send_message(OWNER_ID, txt)
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_add_points")
-def admin_add_points(call):
-    if call.message.chat.id != OWNER_ID:
-        return
-    msg = bot.send_message(OWNER_ID, "أرسل معرف المستخدم وعدد النقاط (مثال: 123456789 5):")
-    bot.register_next_step_handler(msg, add_points_step)
-
-def add_points_step(message):
-    try:
-        parts = message.text.split()
-        uid = int(parts[0])
-        pts = float(parts[1])
-        update_points(uid, pts)
-        bot.send_message(OWNER_ID, f"✅ تم إضافة {pts} نقطة للمستخدم {uid}")
-    except:
-        bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة. أرسل: user_id points")
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_remove_points")
-def admin_remove_points(call):
-    if call.message.chat.id != OWNER_ID:
-        return
-    msg = bot.send_message(OWNER_ID, "أرسل معرف المستخدم وعدد النقاط (مثال: 123456789 3):")
-    bot.register_next_step_handler(msg, remove_points_step)
-
-def remove_points_step(message):
-    try:
-        parts = message.text.split()
-        uid = int(parts[0])
-        pts = float(parts[1])
-        update_points(uid, -pts)
-        bot.send_message(OWNER_ID, f"✅ تم خصم {pts} نقطة من المستخدم {uid}")
-    except:
-        bot.send_message(OWNER_ID, "❌ صيغة غير صحيحة.")
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_stats")
-def admin_stats(call):
-    if call.message.chat.id != OWNER_ID:
-        return
-    c.execute("SELECT COUNT(*) FROM users")
-    users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM exams")
-    exams = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM results")
-    results = c.fetchone()[0]
-    c.execute("SELECT SUM(points) FROM users")
-    total_points = c.fetchone()[0] or 0
-    bot.send_message(OWNER_ID, f"📊 إحصائيات البوت\n👥 المستخدمون: {users}\n📚 الاختبارات: {exams}\n📝 المحاولات: {results}\n⭐ مجموع النقاط: {total_points:.2f}")
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_results")
-def admin_results(call):
-    if call.message.chat.id != OWNER_ID:
-        return
-    msg = bot.send_message(OWNER_ID, "أرسل رمز الاختبار (مثال: ABC123):")
-    bot.register_next_step_handler(msg, show_results_by_code)
-
-def show_results_by_code(message):
-    code = message.text.strip().upper()
-    exam = get_exam_by_code(code)
-    if not exam:
-        bot.send_message(OWNER_ID, "❌ رمز غير صحيح.")
-        return
-    results = get_results_by_exam_id(exam["id"])
-    if not results:
-        bot.send_message(OWNER_ID, f"لا توجد نتائج لاختبار {exam['title']}.")
-        return
-    txt = f"📈 نتائج اختبار {exam['title']}\n\n"
-    for sid, name, score, total, pct, date in results:
-        student_name = name if name else f"مستخدم {sid}"
-        txt += f"👤 {student_name}\n   🎯 {score:.1f}/{total} ({pct:.1f}%)\n   📅 {date[:16]}\n\n"
-    bot.send_message(OWNER_ID, txt)
-
-# معالجة الروابط المباشرة للاختبارات
-@bot.message_handler(func=lambda m: m.text and m.text.startswith("https://t.me/") and "start=exam_" in m.text)
-def handle_exam_link(message):
-    code = message.text.split("start=exam_")[1].split()[0]
-    exam = get_exam_by_code(code)
-    if not exam:
-        bot.send_message(message.chat.id, "❌ رابط غير صحيح.")
-        return
-    
-    msg = bot.send_message(message.chat.id, "📝 أرسل اسمك (سيظهر في الشهادة والنتائج):")
-    bot.register_next_step_handler(msg, process_student_name, exam)
-
 if __name__ == "__main__":
-    print("✅ البوت يعمل...")
+    print("✅ بوت المنبه والتكرار يعمل...")
     bot.remove_webhook()
     bot.infinity_polling()
